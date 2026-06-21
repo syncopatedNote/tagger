@@ -125,6 +125,13 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_REGION_NAME: ${AWS_REGION:-us-east-1}
       LITELLM_LOG: "INFO"
+      # LangSmith tracing of every LLM request/response (the langsmith success +
+      # failure callbacks in litellm_config.yaml). Leave LANGSMITH_API_KEY unset to
+      # no-op the callback. LANGSMITH_PROJECT always has a value so it never blanks
+      # out the project name. For a self-hosted LangSmith, also add LANGSMITH_BASE_URL
+      # here (don't pass it empty — an empty value blanks the default SaaS endpoint).
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-tagger-agents}
     volumes:
       - ./litellm_config.yaml:/app/config.yaml:ro
     command: --config /app/config.yaml --port 4000 --num_workers 4

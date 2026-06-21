@@ -40,5 +40,18 @@ model_list:
 # General settings
 litellm_settings:
   drop_params: true
-  success_callback: []
-  failure_callback: []
+  # Mirror every request AND failure to LangSmith for deep LLM analysis — prompts,
+  # completions, tokens, tool calls, latency. LiteLLM's native langsmith logger
+  # produces real LLM runs in the LangSmith UI (far richer than forwarding the
+  # Dagger engine's infra-shaped OTEL spans, and it captures the actual malformed
+  # tool-use output when a model like Nova trips Bedrock's modelStreamErrorException).
+  # Reads LANGSMITH_API_KEY / LANGSMITH_PROJECT (and optional LANGSMITH_BASE_URL for
+  # self-hosted LangSmith) from the litellm container env — see docker-compose.yml.
+  # NOTE: this ships actual prompt/response content, including the Jira/Confluence
+  # text the context agent reads, to LangSmith. Self-host it if that can't leave
+  # your infra. With LANGSMITH_API_KEY unset the callback simply no-ops per request.
+  success_callback: ["langsmith"]
+  failure_callback: ["langsmith"]
+  # Flush each event immediately instead of batching — this is a low-volume local
+  # proxy, so prefer prompt visibility in the UI over logging throughput.
+  langsmith_batch_size: 1
