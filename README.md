@@ -1,247 +1,96 @@
-# Issue-Driven AI Coding Agent — Temporal × Dagger
+# Tagger — Issue-to-PR AI Coding Agent
 
-An issue (Jira ticket / GitHub issue) goes in; a pull request comes out. A
-**Temporal** workflow orchestrates the long-running, fault-tolerant process,
-while a **Dagger** containerised sandbox runs the actual LLM coding loop in
-isolation. The coding agent is **multi-language**: the target toolchain (Go,
-Python, … — extensible via the `agent_registry`) is selected per run by an
-explicit override or by auto-detecting the repo's marker files.
+Tagger turns a tracked issue into a pull request. Point it at a Jira ticket or GitHub issue and a target repository; it reads the requirements, writes the code, runs the tests, and opens a PR — autonomously, with a human-in-the-loop escape hatch when context is ambiguous.
 
-## Architecture
+## The problem
+
+Modern engineering teams move fast, but the gap between a well-written issue and working code still requires significant human attention. Tagger bridges that gap by treating the issue as a specification and the pull request as the deliverable, automating the full cycle in a way that is auditable, resumable, and production-safe.
+
+## How it works
+
+Tagger runs as a durable, two-phase workflow:
 
 ```
-        ┌──────────────────────── Temporal (orchestration, deterministic) ───────────────────────┐
-        │                                                                                          │
-input → │  CodingAgentWorkflow                                              human "supply-context" │ → PR URL
-        │     │                                                              signal ▲ (on a gap)   │
-        │     ├─ RunContextAgentActivity ─► requirements + Complete? ────────────┘                 │
-        │     ├─ ResolveBaseCommitActivity ► BaseCommitSHA       (strings only; runs in parallel)  │
-        │     ├─ DetectLanguageActivity ───► Language    (override wins; else probe marker files)  │
-        │     ├─ RunCodingAgentActivity ───► BranchName + HeadCommitSHA   (strings only)           │
-        │     └─ CreatePullRequestActivity ► PullRequestURL              (strings only)            │
-        └─────────────────────────────────┬────────────────────────────────────────────────────────┘
-                            ┌──────────────┴──────────────┐
-                            ▼                              ▼
-        ┌──── Dagger: context agent ────┐   ┌──── Dagger: coding agent ─────┐
-        │  mcp-atlassian (read-only)    │   │  per-language workspace (go/   │
-        │  Jira → Confluence → issues   │   │  python/…) + Context7          │ self-heals
-        │  → JSON {requirements,complete}│   │  read → write → test → fix     │ token = Dagger Secret
-        └───────────────────────────────┘   │  verify → push feature branch  │
-                                            └────────────────────────────────┘
-                                          │
-                                          ▼
-                                 Git remote = the data broker
+                         ┌─────────────────────────────────┐
+                         │   Temporal — durable workflow   │
+                         │                                 │
+  Issue reference  ─────►│  1. Context phase               │
+                         │     Read Jira + Confluence,      │
+  Human signal     ─────►│     extract requirements,        │
+  (if needed)            │     flag ambiguity               │
+                         │                                 │
+                         │  2. Coding phase                │
+                         │     LLM agent inside a          │
+                         │     Dagger sandbox:             │
+                         │     write → test → fix → push   │
+                         │                                 │──► Pull Request
+                         └─────────────────────────────────┘
 ```
 
-### Two strict isolation rules
+**Context phase.** An LLM agent crawls Jira and Confluence via a read-only MCP connection and synthesises a structured requirements document. If the requirements are incomplete, the workflow pauses and waits for a human signal before continuing — no silent hallucination of missing context.
 
-1. **Workflows are deterministic.** `workflows/` never imports or calls Dagger,
-   the network, the clock, or randomness. It only sequences activities and
-   passes tiny strings.
-2. **All Dagger execution lives in activities.** Only `activities/context_agent_activity.go`,
-   `activities/detect_language_activity.go`, and `activities/coding_agent_activity.go`
-   open a Dagger connection.
+**Coding phase.** A second LLM agent runs inside an isolated Dagger container with the target repository mounted and the appropriate language toolchain available. It reads, writes, and runs tests in a loop until the suite passes, then pushes a feature branch and opens a pull request.
 
-### Claim-check pattern
+**Orchestration.** Temporal provides the durable execution layer: automatic retries, full event history, and the ability to resume a run that was interrupted mid-flight. The workflow and the LLM execution are deliberately kept separate — the workflow handles sequencing and state; Dagger handles all non-deterministic, side-effectful work.
 
-Activities return **primitives** — a commit SHA, a branch name, a URL — never
-source trees. The repository contents are brokered through the **Git remote**:
-the Dagger activity pushes a branch and hands the workflow back only its name.
-Temporal's event history therefore stays tiny.
+## Key design decisions
 
-## Layout
+**Sandboxed execution.** Every coding action happens inside a reproducible Dagger container. The agent cannot affect the host machine, and the same run will produce the same filesystem state regardless of where the worker is running.
 
-| Path                                    | Role                                                              |
-| --------------------------------------- | ---------------------------------------------------------------- |
-| `types/`                                | Dependency-free DTOs that travel between workflow and activities |
-| `workflows/agent_workflow.go`           | `CodingAgentWorkflow` — orchestration, retry policy, gather/signal-halt + language-select |
-| `activities/git_activities.go`          | `Activities` struct, `ResolveBaseCommitActivity`, `CreatePullRequestActivity` |
-| `activities/context_agent_activity.go`  | `RunContextAgentActivity` — read-only Atlassian (Jira+Confluence) MCP crawl |
-| `activities/detect_language_activity.go`| `DetectLanguageActivity` — probes repo root markers to pick the toolchain |
-| `activities/coding_agent_activity.go`   | `RunCodingAgentActivity` — language-agnostic coding sandbox + Context7 MCP |
-| `agent_registry/`                        | `Registry` (build-once catalog) + `agents/` (per-language `CodingAgent` toolchains: go, python) |
-| `llm_factory/`                           | `Factory` (build-once provider catalog) + `providers/` (anthropic, openai, bedrock-via-LiteLLM) — resolves the Dagger LLM config |
-| `dagger/toolbox/`                        | A Dagger module exposing `ReadFile`/`WriteFile`/`RunTests` as **named** LLM tools |
-| `worker/`                               | Registers the workflow + activities and runs the worker          |
-| `starter/`                              | Kicks off one workflow execution (CLI)                           |
-| `server/`                               | Gin HTTP API: start / status / signal a run                      |
+**Git as the data broker.** The workflow never passes source trees between steps. Instead, each phase pushes to the Git remote and hands back only a branch name or commit SHA. This keeps Temporal's event history compact and the system composable.
 
-> See `robots.md` for the full architecture, rules, completeness policy, MCP wiring, and the human-in-the-loop signal contract.
+**Language-agnostic by design.** The agent selects the appropriate toolchain — Go, Python, or others — either from an explicit override or by probing the target repository's marker files. Adding a new language is a self-contained extension.
 
-## Tool surfacing: two approaches
+**Pluggable LLM providers.** Both the context agent and the coding agent resolve their backend at startup. Anthropic, OpenAI-compatible endpoints, and Amazon Bedrock are supported out of the box.
 
-Both make developer operations available to the LLM as schema'd tools:
+## Requirements
 
-- **Inline (used by the activity):** binding a `Container` to the `Env` exposes
-  that container's operations (read file, write file, exec `go test`) to the
-  model. Works in a plain SDK client with no codegen.
-- **Named (`dagger/toolbox`):** a typed `Toolbox` object whose `ReadFile`,
-  `WriteFile`, and `RunTests` methods surface as the `read_file`, `write_file`,
-  and `run_tests` tools. Run it with `dagger call develop ...`. This is the
-  idiomatic way to give the agent a tight, legible tool surface.
+- Go 1.23+
+- [Dagger CLI](https://docs.dagger.io/install) ≥ v0.19
+- A running [Temporal](https://docs.temporal.io/self-hosted-guide) server
+- An LLM provider API key (Anthropic, OpenAI, or Bedrock)
+- Atlassian API tokens (Jira + Confluence) for the context phase
+- A GitHub token with permission to push branches and open pull requests
 
-## Running it
-
-Prerequisites: a Temporal server, the Dagger engine/CLI (≥ v0.19 for MCP), Go
-1.23+, an LLM provider configured via the `llm_factory` (see below), and
-Atlassian API tokens for the context phase.
-
-### Choosing an LLM provider
-
-The backend is selected once at startup by the **`llm_factory`** from
-`LLM_PROVIDER` (default `anthropic`). The factory exists because the agent loop
-runs *inside Dagger* (`client.LLM`), which picks its provider from engine
-environment variables — so the factory's job is to validate the right
-credentials and emit the model string + env contract the engine needs, not to
-return an SDK client.
-
-| `LLM_PROVIDER` | Required env                                                    | Notes                                                            |
-| -------------- | --------------------------------------------------------------- | ---------------------------------------------------------------- |
-| `anthropic`    | `ANTHROPIC_API_KEY`                                             | Default. Model from `AGENT_MODEL`/`ANTHROPIC_MODEL`.             |
-| `openai`       | `OPENAI_API_KEY`                                               | Set `OPENAI_BASE_URL` to target OpenRouter / LiteLLM / local.   |
-| `bedrock`      | `LLM_BEDROCK_PROXY_URL`, `LLM_BEDROCK_MODEL`                    | Amazon Bedrock via the bundled [LiteLLM proxy](https://docs.dagger.io/reference/configuration/llm/#amazon-bedrock-via-litellm-proxy) (OpenAI-compatible). |
-
-Adding a provider is one file in `llm_factory/providers/` plus one line in
-`llm_factory.New()`. See `.env.example` for the full per-provider knobs.
-
-**Bedrock setup:** Dagger can't talk to Bedrock directly, so a LiteLLM proxy
-(`docker-compose.yml` + `litellm_config.yaml`) fronts it as an OpenAI-compatible
-API:
+## Getting started
 
 ```sh
-# put AWS creds in .env (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION)
-docker compose --profile bedrock up -d litellm     # proxy on :4000
-# then in .env: LLM_PROVIDER=bedrock,
-#   LLM_BEDROCK_PROXY_URL=http://localhost:4000,
-#   LLM_BEDROCK_MODEL=bedrock-claude-3-5-sonnet     # a model_name in litellm_config.yaml
+# 1. Configure
+cp .env.example .env   # fill in your provider key, GitHub token, and Atlassian credentials
+
+# 2. Start the infrastructure (Temporal + API server)
+make up
+
+# 3. Start the worker (runs on the host — needs the Dagger CLI and a Docker socket)
+make worker
+
+# 4. Trigger a run
+make run ISSUE=PROJ-123 REPO=https://github.com/your-org/your-repo
 ```
 
-Add Bedrock models by editing the `model_list` in `litellm_config.yaml`.
+The worker logs progress. When the run completes, the pull request URL is returned via the API and visible in the Temporal UI at `http://localhost:8233`.
 
-### Option A — Hybrid: Docker Compose infra + the worker on the host
+### LLM providers
 
-This is the realistic way to run the whole flow. `docker-compose.yml` runs the
-durable infra — Postgres-backed Temporal, the Temporal UI, and the Gin API
-(built from `server/Dockerfile.server`, a multi-stage scratch image). The **worker runs
-on the host**: it drives the Dagger agent loop, which spawns containers via a
-Dagger engine, so it needs the Dagger CLI + a docker socket (running it on the
-host avoids docker-in-docker).
+| Provider | Notes |
+|---|---|
+| Anthropic | Default. Set your API key in `.env`. |
+| OpenAI-compatible | Covers OpenAI, OpenRouter, LiteLLM, and local models — set the base URL to point at any compatible endpoint. |
+| Amazon Bedrock | Routed through a bundled LiteLLM proxy. Start with `make up-bedrock` and add your AWS credentials to `.env`. |
 
-> **Compose alone does NOT run a full job.** Without the host worker, a triggered
-> run appears in the Temporal UI but every activity stays *Scheduled* forever —
-> nothing is polling the task queue, and there is no Dagger engine. You must run
-> both the compose infra **and** `go run ./worker`.
+### Running without Docker
 
-```sh
-cp .env.example .env     # fill in GITHUB_TOKEN, the LLM provider, JIRA_*/CONFLUENCE_*
+A fully local setup is supported for development: run a Temporal dev server on the host, start the worker directly, and trigger runs via the CLI or the HTTP API. See `.env.example` for the full configuration reference.
 
-# 1. Infra (Anthropic/OpenAI providers)            → or use `make up`
-docker compose up -d                     # postgres + temporal + ui + server
-#   1b. Bedrock provider? start the proxy too:     → or `make up-bedrock`
-#       docker compose --profile bedrock up -d
+## Contributing
 
-# 2. The worker, on the host                        → or `make worker`
-go run ./worker          # host → Temporal at localhost:7233; engine spawns containers
-
-# 3. Trigger a run (see "Triggering a run" below)   → or `make run ISSUE=… REPO=…`
-```
-
-→ Temporal UI `http://localhost:8233` · Gin API `http://localhost:8080` · **Swagger UI `http://localhost:8080/swagger/index.html`** · (Bedrock) LiteLLM `http://localhost:4000`
-
-**Bedrock host-networking gotcha.** When the worker runs on the host but LiteLLM
-runs in compose, the *Dagger engine* (not the worker) makes the OpenAI-compatible
-call, and on macOS that engine is itself a container — so `localhost:4000` points
-at the engine, not your host. Set
-`LLM_BEDROCK_PROXY_URL=http://host.docker.internal:4000` (the `.env.example`
-default) so the engine reaches the published proxy port. AWS creds and
-`LLM_BEDROCK_MODEL` must also be set; the proxy needs `--profile bedrock`.
-
-### Option B — everything on the host (no Docker)
-
-```sh
-go mod tidy
-cp .env.example .env     # then fill in GITHUB_TOKEN, ANTHROPIC_API_KEY, JIRA_*/CONFLUENCE_*
-
-# 1. Temporal dev server (separate terminal)
-temporal server start-dev
-
-# 2. Worker (reads .env)
-go run ./worker
-
-# 3a. Start a run via CLI (-lang is optional; omit to auto-detect the toolchain)
-go run ./starter -issue "PROJ-123" -repo "https://github.com/owner/repo" -base main -lang python
-
-# 3b. …or via the HTTP API ("language" is optional; omit to auto-detect)
-go run ./server   # :8080
-curl -X POST localhost:8080/v1/runs -H 'content-type: application/json' \
-  -d '{"issue_reference":"PROJ-123","repo_url":"https://github.com/owner/repo","language":"python"}'
-# if it halts for missing context, supply it:
-curl -X POST localhost:8080/v1/runs/<workflow_id>/signal -H 'content-type: application/json' \
-  -d '{"info":"design: https://your.atlassian.net/wiki/..."}'
-```
-
-### API docs (Swagger UI)
-
-The Gin server serves interactive OpenAPI docs at
-**`http://localhost:8080/swagger/index.html`** (raw spec at `/swagger/doc.json`).
-The spec is generated from annotations on the handlers in `server/main.go` into
-`server/docs/` by [`swaggo/swag`](https://github.com/swaggo/swag). Regenerate it
-after changing a handler or its request/response types:
-
-```sh
-make swagger        # installs the swag CLI if missing, then runs `swag init`
-```
-
-`server/docs/` is committed so the image builds without the `swag` CLI; keep it
-in sync via `make swagger` when you touch the API.
-
-### Configuration
-
-All config is via env vars, loaded from `.env` (see `.env.example`) or the real
-environment. The full table — including the `JIRA_*` / `CONFLUENCE_*` Atlassian
-settings, `AGENT_CONTEXT_MAX_LOOPS`, `ATLASSIAN_MCP_IMAGE`, and `HTTP_ADDR` — is
-documented in `robots.md` §15.
-
-Context is gathered via `RunContextAgentActivity`, which drives the read-only
-mcp-atlassian MCP server. Supply missing context via the HTTP signal API or the
-Temporal UI.
-
-## Code quality
-
-The repo ships pre-commit hooks that guard every commit and push.
-
-**First-time setup** — run once after your initial commit:
+Install the git hooks after your first commit:
 
 ```sh
 make hooks
 ```
 
-This runs `pre-commit install --install-hooks`, which wires both the
-`pre-commit` and `pre-push` git hooks and pre-downloads all linter environments
-(gitleaks, golangci-lint). Requires `pre-commit` (`brew install pre-commit`).
-
-**Commit-time checks** (fast — blocks the commit):
-
-| Stage | What it catches |
-|---|---|
-| `detect-private-key` | PEM private keys accidentally staged |
-| `check-merge-conflict` | Unresolved `<<<<<<` markers |
-| `check-added-large-files` | Files > 1 MB |
-| `check-yaml` | Malformed YAML |
-| `end-of-file-fixer` / `trailing-whitespace` | Whitespace noise |
-| gitleaks | Secrets / credentials in staged diff |
-| golangci-lint fmt | `gofmt` + `goimports` formatting |
-| golangci-lint | `go vet` + standard linters (new code only) |
-| go vet | Host-toolchain vet over the project package list |
-| go mod tidy | Fails if `go.mod`/`go.sum` need updating |
-
-**Push-time checks** (slower — blocks `git push`):
-
-| Stage | What it catches |
-|---|---|
-| go test | Full test suite via `make test` |
-
-Run all hooks manually without committing:
+This wires pre-commit checks (secret scanning, formatting, linting, `go mod tidy`) and a pre-push test gate. Requires [`pre-commit`](https://pre-commit.com) (`brew install pre-commit`). Run checks at any time without committing:
 
 ```sh
 pre-commit run --all-files
