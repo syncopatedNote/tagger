@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os/exec"
 	"strings"
 
 	"go.temporal.io/sdk/activity"
@@ -49,25 +48,58 @@ func (a *Activities) ResolveBaseCommitActivity(ctx context.Context, in types.Res
 	return types.ResolveBaseCommitResult{BaseCommitSHA: sha}, nil
 }
 
-// resolveBaseCommit returns the commit SHA at the tip of branch in repoURL.
+// resolveBaseCommit returns the commit SHA at the tip of branch in repoURL via
+// the GitHub REST API. No git binary is required — the worker's GITHUB_TOKEN is
+// the only credential needed, and the call is a plain HTTPS request.
 func (a *Activities) resolveBaseCommit(ctx context.Context, repoURL, branch string) (string, error) {
-	// A private repo needs credentials here too; inject them via an
-	// askpass/credential helper or an https://x-access-token:...@ URL. We keep
-	// the public path for clarity.
-	cmd := exec.CommandContext(ctx, "git", "ls-remote", repoURL, "refs/heads/"+branch)
-	var out, errBuf bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &errBuf
-	if err := cmd.Run(); err != nil {
-		// Treated as retryable (network/transport hiccup).
-		return "", fmt.Errorf("git ls-remote failed: %w: %s", err, errBuf.String())
+	owner, repo, err := parseGitHubRepo(repoURL)
+	if err != nil {
+		return "", temporal.NewNonRetryableApplicationError(
+			"could not parse owner/repo from RepoURL", "ValidationError", err)
 	}
-	fields := strings.Fields(out.String())
-	if len(fields) == 0 {
+
+	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/branches/%s", owner, repo, branch)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", fmt.Errorf("building branch request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+a.githubToken)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("fetching branch info: %w", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	closeErr := resp.Body.Close()
+	if err != nil {
+		return "", fmt.Errorf("reading response: %w", err)
+	}
+	if closeErr != nil {
+		return "", fmt.Errorf("closing response body: %w", closeErr)
+	}
+
+	if resp.StatusCode == http.StatusNotFound {
 		return "", temporal.NewNonRetryableApplicationError(
 			fmt.Sprintf("branch %q not found in %s", branch, repoURL), "ValidationError", nil)
 	}
-	return fields[0], nil
+	if resp.StatusCode >= 300 {
+		return "", fmt.Errorf("github API %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Commit struct {
+			SHA string `json:"sha"`
+		} `json:"commit"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("parsing branch response: %w", err)
+	}
+	if result.Commit.SHA == "" {
+		return "", fmt.Errorf("empty commit SHA in branch response for %s/%s", owner, repo)
+	}
+	return result.Commit.SHA, nil
 }
 
 // -----------------------------------------------------------------------------
@@ -114,8 +146,14 @@ func (a *Activities) CreatePullRequestActivity(ctx context.Context, in types.Cre
 	if err != nil {
 		return types.CreatePullRequestResult{}, err // retryable network error
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	closeErr := resp.Body.Close()
+	if err != nil {
+		return types.CreatePullRequestResult{}, fmt.Errorf("reading response: %w", err)
+	}
+	if closeErr != nil {
+		return types.CreatePullRequestResult{}, fmt.Errorf("closing response body: %w", closeErr)
+	}
 
 	switch {
 	case resp.StatusCode == http.StatusUnprocessableEntity:

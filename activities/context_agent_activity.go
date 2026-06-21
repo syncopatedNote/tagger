@@ -17,17 +17,17 @@ import (
 // contextAgentSystemPrompt drives the Atlassian context-gathering agent. The LLM
 // is given the read-only mcp-atlassian tools (jira_get_issue, jira_search,
 // confluence_get_page, confluence_search, ...) and asked to crawl from the
-// seed Jira ticket out to its linked Confluence design and any further linked
-// issues, then report a single distilled brief plus a completeness verdict.
+// seed Jira ticket out to linked Confluence designs and any further linked
+// issues, then report a distilled brief plus a completeness verdict.
 //
-// The completeness rules encoded here mirror the policy in robots.md:
-//   - the Jira body must be non-empty / non-placeholder,
-//   - at least one reachable Confluence design must be found,
-//   - every referenced link that is followed must resolve (no 404 / access
-//     denied).
-//
-// Missing acceptance criteria is recorded as a note but does NOT, by itself,
-// make the bundle incomplete.
+// Completeness rules (in priority order):
+//   - A human supplement that explicitly says to proceed overrides everything.
+//   - The Jira body must be non-empty / non-placeholder, OR supplements fill it.
+//   - Confluence is only required when the issue EXPLICITLY references a page
+//     that could not be read AND no supplement substitutes it. A project with
+//     no Confluence links is not incomplete for lacking Confluence.
+//   - Only resources explicitly named in the issue/supplements and critically
+//     unreachable (with no substitute) make the bundle incomplete.
 const contextAgentSystemPrompt = `You are a meticulous staff engineer gathering ALL the context needed to implement a ticket. You have read-only Jira and Confluence tools. You cannot and must not create, edit, transition, or comment on anything.
 
 You are given:
@@ -40,21 +40,35 @@ Crawl, in order:
 3. In each Confluence design, read the body AND its comments. If a comment or the body mentions further Jira/Git issue keys, read those issues too.
 4. Fold in anything from ` + "`supplements`" + `.
 
-Then decide completeness using these rules EXACTLY:
-- INCOMPLETE if the Jira issue has an empty or placeholder description (just a title, "TBD", "see design", etc. with no real content).
-- INCOMPLETE if you found NO Confluence design page anywhere in the crawl.
-- INCOMPLETE if any link you tried to follow failed (404, not found, permission denied).
-- Otherwise COMPLETE. (A design that merely lacks an explicit "acceptance criteria" heading is still COMPLETE — just note it.)
+Then decide completeness by applying these rules IN ORDER — stop at the first that applies:
+
+1. COMPLETE immediately if any supplement contains an explicit instruction to proceed (e.g. "proceed", "no more context", "do not ask again", "use what you have"). The human has reviewed the situation and authorised you to continue — compile the best brief you can from everything gathered and return complete=true.
+
+2. INCOMPLETE if the Jira issue body is empty or a placeholder (just a title, "TBD", "see design", etc. with no real content) AND no supplement has provided the missing description.
+
+3. INCOMPLETE if the Jira issue or a supplement explicitly references a specific Confluence page (by URL or page ID) AND that page could not be read (404 / access denied) AND no supplement provides equivalent design information.
+
+4. INCOMPLETE if another resource explicitly named in the issue or supplements is critically unreachable (404 / access denied) AND no supplement explains or substitutes it.
+
+5. COMPLETE in all other cases. None of the following make the bundle incomplete on their own: no Confluence page was ever referenced, an acceptance criteria section is absent, an optional source returned no results, or Confluence exists but was not linked from this issue. If you have enough information to understand what to implement, return complete=true.
 
 Return ONLY a single JSON object, no prose, no markdown fences, matching:
 {
-  "requirements": "<the full distilled, implementation-ready brief assembled from the ticket + design + linked issues>",
+  "requirements": "<the full distilled, implementation-ready brief assembled from the ticket + design + linked issues + supplements>",
   "title": "<short PR-title-style summary>",
   "complete": <true|false>,
   "missing": ["<specific human-readable gap>", ...]
 }
 
-When complete is true, "missing" must be []. When false, "missing" must name exactly what a human needs to supply (e.g. "PROJ-123 links no Confluence design page" or "Confluence page 45678 returned 403 — grant access or provide the design").`
+When complete is true, "missing" must be []. When false, "missing" must name exactly what a human needs to supply (e.g. "Confluence page 45678 returned 403 — grant access or provide the design content directly").`
+
+// githubContextPromptAddendum extends the context-agent system prompt ONLY when
+// the read-only GitHub MCP server is attached (see RunContextAgentActivity). It
+// tells the model it has GitHub read tools and exactly when to reach for them, so
+// the base prompt never advertises tools the agent may not have.
+const githubContextPromptAddendum = `
+
+You ALSO have read-only GitHub tools (get issue, search issues, get pull request, read file contents). Use them ONLY when the Jira ticket or a linked Confluence design references a GitHub issue, pull request, repository, or file — fetch that referenced GitHub context and fold it into the brief. You cannot and must not create, edit, comment on, or merge anything on GitHub. If a GitHub reference you try to follow fails to resolve (not found / no access), record it in "missing" exactly as you would a broken Confluence link.`
 
 // RunContextAgentActivity gathers all implementation context for a ticket by
 // driving an LLM that has the read-only mcp-atlassian tool surface. It crawls
@@ -75,7 +89,14 @@ func (a *Activities) RunContextAgentActivity(ctx context.Context, in types.Gathe
 		return types.GatherContextResult{}, temporal.NewNonRetryableApplicationError(
 			"IssueReference is required", "ValidationError", nil)
 	}
-	if err := a.atlassian.validate(); err != nil {
+	// The Atlassian MCP server is the REQUIRED primary source for the crawl; a
+	// missing or incomplete config is a non-retryable setup error.
+	atlassian, ok := a.mcpServers[mcpAtlassian]
+	if !ok {
+		return types.GatherContextResult{}, temporal.NewNonRetryableApplicationError(
+			"atlassian MCP server is not registered", "ValidationError", nil)
+	}
+	if err := atlassian.validate(); err != nil {
 		return types.GatherContextResult{}, temporal.NewNonRetryableApplicationError(
 			err.Error(), "ValidationError", nil)
 	}
@@ -94,11 +115,6 @@ func (a *Activities) RunContextAgentActivity(ctx context.Context, in types.Gathe
 	defer client.Close()
 	logger.Info("Dagger engine connected", "attempt", activity.GetInfo(ctx).Attempt)
 
-	// Stand up the mcp-atlassian server as a Dagger service. Credentials are
-	// injected as Dagger SECRETS (scrubbed from cache/logs); READ_ONLY_MODE pins
-	// the tool surface to read-only so the agent can never mutate Atlassian data.
-	mcpService := a.atlassianMCPService(client)
-
 	env := client.Env().
 		WithStringInput("issue", in.IssueReference,
 			"the seed Jira issue key or URL to gather context for").
@@ -107,13 +123,28 @@ func (a *Activities) RunContextAgentActivity(ctx context.Context, in types.Gathe
 		WithStringOutput("result",
 			"a single JSON object: {requirements, title, complete, missing[]}")
 
+	// Attach the required read-only Atlassian MCP server. build() injects the
+	// credentials as Dagger secrets (scrubbed from cache/logs) and exposes only the
+	// server's tools to the model.
+	systemPrompt := contextAgentSystemPrompt
 	agent := client.LLM(dagger.LLMOpts{
 		Model:       a.LLM.Model,
 		MaxAPICalls: a.MaxContextLoops,
 	}).
 		WithEnv(env).
-		WithMCPServer("atlassian", mcpService).
-		WithSystemPrompt(contextAgentSystemPrompt).
+		WithMCPServer(mcpAtlassian, atlassian.build(client))
+
+	// Optionally attach the read-only GitHub MCP server — present only when a GitHub
+	// token is configured. When attached, extend the system prompt so the model
+	// knows it can fetch GitHub issues/PRs/files the ticket references.
+	if github, ok := a.mcpServers[mcpGitHub]; ok && github.validate() == nil {
+		agent = agent.WithMCPServer(mcpGitHub, github.build(client))
+		systemPrompt += githubContextPromptAddendum
+		logger.Info("GitHub MCP server attached to context agent (read-only)")
+	}
+
+	agent = agent.
+		WithSystemPrompt(systemPrompt).
 		WithPrompt("Gather the full context for `issue`, applying any `supplements`, and return the JSON result.")
 
 	logger.Info("Context agent loop running", "model", a.LLM.Model, "maxAPICalls", a.MaxContextLoops)
@@ -148,37 +179,6 @@ func (a *Activities) RunContextAgentActivity(ctx context.Context, in types.Gathe
 	logger.Info("Context gather verdict",
 		"complete", bundle.Complete, "missing", bundle.Missing, "title", bundle.Title)
 	return bundle, nil
-}
-
-// atlassianMCPService builds the read-only mcp-atlassian server as a Dagger
-// Service. The Atlassian credentials are provided as Dagger secrets so they are
-// scrubbed from build caches and engine logs and never surface to the LLM
-// context — the LLM only ever sees the server's TOOLS, never its env.
-func (a *Activities) atlassianMCPService(client *dagger.Client) *dagger.Service {
-	jiraToken := client.SetSecret("jira-api-token", a.atlassian.JiraToken)
-	confToken := client.SetSecret("confluence-api-token", a.atlassian.ConfluenceToken)
-
-	return client.Container().
-		From(a.atlassian.Image).
-		// Read-only: only get/search tools are exposed; no create/update/transition.
-		WithEnvVariable("READ_ONLY_MODE", "true").
-		WithEnvVariable("JIRA_URL", a.atlassian.JiraURL).
-		WithEnvVariable("JIRA_USERNAME", a.atlassian.JiraUsername).
-		WithSecretVariable("JIRA_API_TOKEN", jiraToken).
-		WithEnvVariable("JIRA_SSL_VERIFY", a.atlassian.JiraSSLVerify).
-		WithEnvVariable("CONFLUENCE_URL", a.atlassian.ConfluenceURL).
-		WithEnvVariable("CONFLUENCE_USERNAME", a.atlassian.ConfluenceUsername).
-		WithSecretVariable("CONFLUENCE_API_TOKEN", confToken).
-		WithEnvVariable("CONFLUENCE_SSL_VERIFY", a.atlassian.ConfluenceSSLVerify).
-		// Dagger's LLM.WithMCPServer speaks MCP over the service container's STDIO,
-		// NOT over a network port, so run the server in stdio transport: its
-		// stdin/stdout carry the MCP JSON-RPC handshake. Running it as an HTTP
-		// server (streamable-http/--port) makes the agent hang forever — Dagger
-		// writes `initialize` to stdin and the HTTP server never answers on stdout.
-		AsService(dagger.ContainerAsServiceOpts{
-			Args:          []string{"--transport", "stdio", "-vv"},
-			UseEntrypoint: true,
-		})
 }
 
 // parseGatherResult decodes the agent's JSON verdict into a typed result. It is

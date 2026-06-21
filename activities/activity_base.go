@@ -18,57 +18,12 @@
 package activities
 
 import (
-	"fmt"
 	"log"
 	"os"
-	"strings"
 
 	"github.com/syncopatedNote/tagger/agent_registry"
 	"github.com/syncopatedNote/tagger/llm_factory"
 )
-
-// atlassianConfig holds the connection settings for the read-only mcp-atlassian
-// server used by RunContextAgentActivity. Tokens are kept here (worker-side
-// only) and injected into the MCP container as Dagger secrets — never logged,
-// never placed in a Temporal payload.
-type atlassianConfig struct {
-	Image string // mcp-atlassian image, e.g. ghcr.io/sooperset/mcp-atlassian:latest
-
-	JiraURL       string
-	JiraUsername  string
-	JiraToken     string
-	JiraSSLVerify string
-
-	ConfluenceURL       string
-	ConfluenceUsername  string
-	ConfluenceToken     string
-	ConfluenceSSLVerify string
-}
-
-// validate ensures the minimum Atlassian settings are present before we try to
-// stand up the MCP server. Missing config is a non-retryable setup error.
-func (c atlassianConfig) validate() error {
-	var missing []string
-	if strings.TrimSpace(c.JiraURL) == "" {
-		missing = append(missing, "JIRA_URL")
-	}
-	if strings.TrimSpace(c.JiraUsername) == "" {
-		missing = append(missing, "JIRA_USERNAME")
-	}
-	if strings.TrimSpace(c.JiraToken) == "" {
-		missing = append(missing, "JIRA_API_TOKEN")
-	}
-	if strings.TrimSpace(c.ConfluenceURL) == "" {
-		missing = append(missing, "CONFLUENCE_URL")
-	}
-	if strings.TrimSpace(c.ConfluenceToken) == "" {
-		missing = append(missing, "CONFLUENCE_API_TOKEN")
-	}
-	if len(missing) > 0 {
-		return fmt.Errorf("missing Atlassian configuration: %s", strings.Join(missing, ", "))
-	}
-	return nil
-}
 
 // Activities bundles the dependencies/configuration shared by every activity.
 //
@@ -98,9 +53,12 @@ type Activities struct {
 	// simulatePR, when true, skips the live GitHub API call and returns a
 	// synthetic URL — handy for local runs, demos, and tests.
 	simulatePR bool
-	// atlassian holds the read-only mcp-atlassian connection config consumed by
-	// RunContextAgentActivity. Tokens stay worker-side; see context_agent_activity.go.
-	atlassian atlassianConfig
+	// mcpServers is the startup-built registry of every MCP server spec, keyed by
+	// logical name ("atlassian", "github", "context7"). Specs are pure data, so the
+	// map is built once and shared read-only across activity goroutines; an activity
+	// calls spec.build(client) to stand a server up at activity time. See
+	// activities/mcp.go.
+	mcpServers map[string]mcpServerSpec
 	// agents is the startup-time catalog of per-language coding-agent toolchains.
 	// RunCodingAgentActivity resolves in.Language to a CodingAgent through it.
 	// Built once in NewActivities and shared for the worker's lifetime.
@@ -140,16 +98,6 @@ func NewActivities() *Activities {
 		githubToken:     os.Getenv("GITHUB_TOKEN"),
 		simulatePR:      getenv("AGENT_SIMULATE_PR", "true") == "true",
 		agents:          agent_registry.New(),
-		atlassian: atlassianConfig{
-			Image:               getenv("ATLASSIAN_MCP_IMAGE", "ghcr.io/sooperset/mcp-atlassian:latest"),
-			JiraURL:             os.Getenv("JIRA_URL"),
-			JiraUsername:        os.Getenv("JIRA_USERNAME"),
-			JiraToken:           os.Getenv("JIRA_API_TOKEN"),
-			JiraSSLVerify:       getenv("JIRA_SSL_VERIFY", "true"),
-			ConfluenceURL:       os.Getenv("CONFLUENCE_URL"),
-			ConfluenceUsername:  os.Getenv("CONFLUENCE_USERNAME"),
-			ConfluenceToken:     os.Getenv("CONFLUENCE_API_TOKEN"),
-			ConfluenceSSLVerify: getenv("CONFLUENCE_SSL_VERIFY", "true"),
-		},
+		mcpServers:      newMCPRegistry(),
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"dagger.io/dagger"
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/temporal"
 
@@ -62,7 +63,10 @@ func (a *Activities) DetectLanguageActivity(ctx context.Context, in types.Detect
 	// only need top-level markers, so there is no full clone and no per-file
 	// round-trip. (Per-subdirectory languages in a monorepo are out of scope for
 	// now — a documented seam to extend later.)
-	tree := client.Git(in.RepoURL).Commit(in.BaseCommitSHA).Tree()
+	tree := client.Git(in.RepoURL, dagger.GitOpts{
+		HTTPAuthUsername: "x-access-token",
+		HTTPAuthToken:    client.SetSecret("github-token", a.githubToken),
+	}).Commit(in.BaseCommitSHA).Tree()
 	entries, err := tree.Entries(ctx)
 	if err != nil {
 		// Network/transport hiccup — let Temporal's retry policy handle it.

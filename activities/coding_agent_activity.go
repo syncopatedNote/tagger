@@ -77,7 +77,10 @@ func (a *Activities) RunCodingAgentActivity(ctx context.Context, in types.RunCod
 	// 2. Source tree at the pinned commit, mounted into a workspace built from the
 	//    toolchain's image with its dependency caches. The tree contains source
 	//    only — no .git, no credentials.
-	source := client.Git(in.RepoURL).Commit(in.BaseCommitSHA).Tree()
+	source := client.Git(in.RepoURL, dagger.GitOpts{
+		HTTPAuthUsername: "x-access-token",
+		HTTPAuthToken:    client.SetSecret("github-token-read", a.githubToken),
+	}).Commit(in.BaseCommitSHA).Tree()
 	workspace := client.Container().
 		From(agentTool.BaseImage()).
 		WithDirectory("/src", source).
@@ -111,7 +114,7 @@ func (a *Activities) RunCodingAgentActivity(ctx context.Context, in types.RunCod
 	// coding loop — the repo itself is already mounted in the workspace, so no
 	// GitHub/code-reading MCP is needed. Each Context7 call counts against
 	// MaxAPICalls, so the budget below accounts for some doc lookups.
-	context7 := context7MCPService(client)
+	context7 := a.mcpServers[mcpContext7].build(client)
 
 	// MaxAPICalls is the Dagger-level runaway guard: it bounds how many tool /
 	// model round-trips the loop may take (see Verification Q2). If your Dagger
@@ -122,7 +125,7 @@ func (a *Activities) RunCodingAgentActivity(ctx context.Context, in types.RunCod
 		MaxAPICalls: a.MaxAgentLoops,
 	}).
 		WithEnv(env).
-		WithMCPServer("context7", context7).
+		WithMCPServer(mcpContext7, context7).
 		WithPrompt(agents.BuildSystemPrompt(agentTool))
 
 	// Pull the produced container out of the post-run environment. Calling
@@ -201,20 +204,6 @@ func (a *Activities) RunCodingAgentActivity(ctx context.Context, in types.RunCod
 	headSHA := lastNonEmptyLine(out)
 	logger.Info("Pushed feature branch", "branch", branch, "head", headSHA)
 	return types.RunCodingAgentResult{BranchName: branch, HeadCommitSHA: headSHA}, nil
-}
-
-// context7MCPService stands up the Context7 documentation MCP server as a Dagger
-// service. Dagger's LLM.WithMCPServer speaks MCP over the service container's
-// STDIO (not HTTP), so context7 runs in its default stdio transport with the
-// command passed as the service args. Context7 needs no credentials for public
-// docs. Running it from a pinned Node image keeps the toolchain reproducible and
-// cache-friendly.
-func context7MCPService(client *dagger.Client) *dagger.Service {
-	return client.Container().
-		From("node:22-alpine").
-		AsService(dagger.ContainerAsServiceOpts{
-			Args: []string{"npx", "-y", "@upstash/context7-mcp"},
-		})
 }
 
 // featureBranchName builds a unique, push-safe branch name for the run.
