@@ -1,0 +1,289 @@
+{
+    "swagger": "2.0",
+    "info": {
+        "description": "Trigger and steer issue-driven coding-agent workflows. A thin,\nstateless adapter over Temporal — Temporal holds all durable state.",
+        "title": "Coding Agent API",
+        "contact": {},
+        "version": "1.0"
+    },
+    "basePath": "/",
+    "paths": {
+        "/healthz": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "health"
+                ],
+                "summary": "Liveness probe",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/main.healthResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/runs": {
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "runs"
+                ],
+                "summary": "Start a run",
+                "parameters": [
+                    {
+                        "description": "Run parameters",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/main.startRunRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "202": {
+                        "description": "Accepted",
+                        "schema": {
+                            "$ref": "#/definitions/main.startRunResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "invalid body",
+                        "schema": {
+                            "$ref": "#/definitions/main.errorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "failed to start the workflow",
+                        "schema": {
+                            "$ref": "#/definitions/main.errorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/runs/{id}": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "runs"
+                ],
+                "summary": "Get run status",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Workflow ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/main.runStatusResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "run not found",
+                        "schema": {
+                            "$ref": "#/definitions/main.errorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/runs/{id}/signal": {
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "runs"
+                ],
+                "summary": "Signal a run (supply missing context)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Workflow ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Context to supply",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/main.signalRunRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/main.signalResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "invalid body",
+                        "schema": {
+                            "$ref": "#/definitions/main.errorResponse"
+                        }
+                    },
+                    "502": {
+                        "description": "failed to deliver the signal",
+                        "schema": {
+                            "$ref": "#/definitions/main.errorResponse"
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "definitions": {
+        "main.errorResponse": {
+            "type": "object",
+            "properties": {
+                "error": {
+                    "type": "string",
+                    "example": "repo_url is required"
+                }
+            }
+        },
+        "main.healthResponse": {
+            "type": "object",
+            "properties": {
+                "ok": {
+                    "type": "boolean",
+                    "example": true
+                }
+            }
+        },
+        "main.runStatusResponse": {
+            "type": "object",
+            "properties": {
+                "error": {
+                    "type": "string"
+                },
+                "result": {
+                    "$ref": "#/definitions/types.CodingAgentResult"
+                },
+                "status": {
+                    "type": "string",
+                    "example": "Running"
+                },
+                "workflow_id": {
+                    "type": "string",
+                    "example": "coding-agent-PROJ-123-1718800000"
+                }
+            }
+        },
+        "main.signalResponse": {
+            "type": "object",
+            "properties": {
+                "signaled": {
+                    "type": "string",
+                    "example": "supply-context"
+                },
+                "workflow_id": {
+                    "type": "string",
+                    "example": "coding-agent-PROJ-123-1718800000"
+                }
+            }
+        },
+        "main.signalRunRequest": {
+            "type": "object",
+            "required": [
+                "info"
+            ],
+            "properties": {
+                "info": {
+                    "type": "string",
+                    "example": "design doc: https://acme.atlassian.net/wiki/..."
+                }
+            }
+        },
+        "main.startRunRequest": {
+            "type": "object",
+            "required": [
+                "issue_reference",
+                "repo_url"
+            ],
+            "properties": {
+                "base_branch": {
+                    "type": "string",
+                    "example": "main"
+                },
+                "issue_reference": {
+                    "type": "string",
+                    "example": "PROJ-123"
+                },
+                "language": {
+                    "description": "Language optionally overrides the coding-agent toolchain (\"go\", \"python\",\n...). Omit it to have the workflow auto-detect from the repo.",
+                    "type": "string",
+                    "example": "python"
+                },
+                "repo_url": {
+                    "type": "string",
+                    "example": "https://github.com/owner/repo"
+                }
+            }
+        },
+        "main.startRunResponse": {
+            "type": "object",
+            "properties": {
+                "run_id": {
+                    "type": "string",
+                    "example": "7b674799-1c95-4b10-975a-f90968d88036"
+                },
+                "status_url": {
+                    "type": "string",
+                    "example": "/v1/runs/coding-agent-PROJ-123-1718800000"
+                },
+                "workflow_id": {
+                    "type": "string",
+                    "example": "coding-agent-PROJ-123-1718800000"
+                }
+            }
+        },
+        "types.CodingAgentResult": {
+            "type": "object",
+            "properties": {
+                "branchName": {
+                    "type": "string"
+                },
+                "headCommitSHA": {
+                    "type": "string"
+                },
+                "pullRequestURL": {
+                    "type": "string"
+                }
+            }
+        }
+    },
+    "tags": [
+        {
+            "description": "Start, inspect, and unblock coding-agent runs",
+            "name": "runs"
+        }
+    ]
+}

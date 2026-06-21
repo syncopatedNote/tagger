@@ -1,0 +1,23 @@
+version: "2"
+
+run:
+  timeout: 3m
+
+linters:
+  default: standard
+  exclusions:
+    paths:
+      - dagger/toolbox
+      - server/docs
+
+formatters:
+  enable:
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/syncopatedNote/tagger
+  exclusions:
+    paths:
+      - dagger/toolbox
+      - server/docs

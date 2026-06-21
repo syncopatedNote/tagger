@@ -1,0 +1,35 @@
+# Keep the Docker build context lean and secret-free. The server image only
+# needs the Go module sources; everything below is either a secret, an artifact,
+# or irrelevant to the build.
+
+# Secrets — must NEVER enter an image layer.
+.env
+.env.local
+.env.*.local
+
+# VCS / CI
+.git
+.gitignore
+.github
+
+# Build artifacts
+/bin/
+*.exe
+*.test
+*.out
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Docs and local infra config (not needed to build the binary)
+README.md
+robots.md
+docker-compose.yml
+*.Dockerfile
+litellm_config.yaml
+
+# The Dagger toolbox is a separate module with generated code that only builds
+# under `dagger develop`; it is not part of the server build.
+dagger/

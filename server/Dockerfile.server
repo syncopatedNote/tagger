@@ -1,0 +1,39 @@
+# Multi-stage build for the Gin HTTP API (cmd: ./server).
+#
+# The server is a thin, stateless Temporal client — it imports neither Dagger nor
+# anything needing cgo — so it compiles to a single static binary and ships on
+# `scratch` (just the binary + CA certs for outbound TLS to GitHub/Temporal).
+#
+# Build context is the REPO ROOT (the Go module lives there):
+#   docker build -f server/Dockerfile -t tagger-server .
+# Or via docker-compose.yml, which sets the context for you.
+
+# ---- build stage ------------------------------------------------------------
+FROM golang:1.26 AS build
+WORKDIR /src
+
+# Cache module downloads on the go.mod/go.sum layer so source edits don't refetch.
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Bring in the rest of the module and build the server command.
+COPY . .
+
+# CGO_ENABLED=0 → a fully static binary that runs on scratch. -trimpath/-ldflags
+# strip local paths and debug info for a smaller, reproducible artifact.
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -trimpath -ldflags="-s -w" \
+    -o /out/server ./server
+
+# ---- runtime stage ----------------------------------------------------------
+FROM scratch
+
+# CA roots so the server can dial Temporal over TLS and call the GitHub API.
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=build /out/server /server
+
+# The Gin server binds HTTP_ADDR (default :8080).
+EXPOSE 8080
+
+# No shell in scratch; exec form is required.
+ENTRYPOINT ["/server"]

@@ -1,0 +1,21 @@
+# Local environment — contains real secrets, never commit it.
+.env
+.env.local
+
+# Go build artifacts
+/bin/
+*.exe
+*.test
+*.out
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Claude files
+.claude*
+.claude/
+Claude*
+CLAUDE*
+claude*

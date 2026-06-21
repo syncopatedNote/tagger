@@ -1,0 +1,195 @@
+basePath: /
+definitions:
+  main.errorResponse:
+    properties:
+      error:
+        example: repo_url is required
+        type: string
+    type: object
+  main.healthResponse:
+    properties:
+      ok:
+        example: true
+        type: boolean
+    type: object
+  main.runStatusResponse:
+    properties:
+      error:
+        type: string
+      result:
+        $ref: '#/definitions/types.CodingAgentResult'
+      status:
+        example: Running
+        type: string
+      workflow_id:
+        example: coding-agent-PROJ-123-1718800000
+        type: string
+    type: object
+  main.signalResponse:
+    properties:
+      signaled:
+        example: supply-context
+        type: string
+      workflow_id:
+        example: coding-agent-PROJ-123-1718800000
+        type: string
+    type: object
+  main.signalRunRequest:
+    properties:
+      info:
+        example: 'design doc: https://acme.atlassian.net/wiki/...'
+        type: string
+    required:
+    - info
+    type: object
+  main.startRunRequest:
+    properties:
+      base_branch:
+        example: main
+        type: string
+      issue_reference:
+        example: PROJ-123
+        type: string
+      language:
+        description: |-
+          Language optionally overrides the coding-agent toolchain ("go", "python",
+          ...). Omit it to have the workflow auto-detect from the repo.
+        example: python
+        type: string
+      repo_url:
+        example: https://github.com/owner/repo
+        type: string
+    required:
+    - issue_reference
+    - repo_url
+    type: object
+  main.startRunResponse:
+    properties:
+      run_id:
+        example: 7b674799-1c95-4b10-975a-f90968d88036
+        type: string
+      status_url:
+        example: /v1/runs/coding-agent-PROJ-123-1718800000
+        type: string
+      workflow_id:
+        example: coding-agent-PROJ-123-1718800000
+        type: string
+    type: object
+  types.CodingAgentResult:
+    properties:
+      branchName:
+        type: string
+      headCommitSHA:
+        type: string
+      pullRequestURL:
+        type: string
+    type: object
+info:
+  contact: {}
+  description: |-
+    Trigger and steer issue-driven coding-agent workflows. A thin,
+    stateless adapter over Temporal — Temporal holds all durable state.
+  title: Coding Agent API
+  version: "1.0"
+paths:
+  /healthz:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/main.healthResponse'
+      summary: Liveness probe
+      tags:
+      - health
+  /v1/runs:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Run parameters
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/main.startRunRequest'
+      produces:
+      - application/json
+      responses:
+        "202":
+          description: Accepted
+          schema:
+            $ref: '#/definitions/main.startRunResponse'
+        "400":
+          description: invalid body
+          schema:
+            $ref: '#/definitions/main.errorResponse'
+        "500":
+          description: failed to start the workflow
+          schema:
+            $ref: '#/definitions/main.errorResponse'
+      summary: Start a run
+      tags:
+      - runs
+  /v1/runs/{id}:
+    get:
+      parameters:
+      - description: Workflow ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/main.runStatusResponse'
+        "404":
+          description: run not found
+          schema:
+            $ref: '#/definitions/main.errorResponse'
+      summary: Get run status
+      tags:
+      - runs
+  /v1/runs/{id}/signal:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Workflow ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Context to supply
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/main.signalRunRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/main.signalResponse'
+        "400":
+          description: invalid body
+          schema:
+            $ref: '#/definitions/main.errorResponse'
+        "502":
+          description: failed to deliver the signal
+          schema:
+            $ref: '#/definitions/main.errorResponse'
+      summary: Signal a run (supply missing context)
+      tags:
+      - runs
+swagger: "2.0"
+tags:
+- description: Start, inspect, and unblock coding-agent runs
+  name: runs

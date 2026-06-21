@@ -1,0 +1,44 @@
+# LiteLLM proxy config — fronts Amazon Bedrock as an OpenAI-compatible API so the
+# Dagger engine (which has no native Bedrock transport) can reach it. Mounted into
+# the `litellm` service in docker-compose.yml at /app/config.yaml.
+#
+# How it connects to this app:
+#   LLM_PROVIDER=bedrock
+#   LLM_BEDROCK_PROXY_URL=http://localhost:4000   (the proxy below)
+#   LLM_BEDROCK_MODEL=bedrock-claude-3-5-sonnet   (a `model_name` from model_list)
+#   LLM_BEDROCK_PROXY_KEY=<LITELLM_MASTER_KEY>    (if the proxy is authenticated)
+# The llm_factory's bedrock provider translates those into the OPENAI_* env vars
+# Dagger reads (see llm_factory/providers/bedrock.go).
+#
+# AWS credentials are supplied to the proxy CONTAINER (not this file) via
+# AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_REGION_NAME — see docker-compose.yml.
+# `drop_params: true` is REQUIRED for Bedrock: it drops OpenAI-only params
+# (seed, parallel_tool_calls) that Bedrock rejects.
+
+model_list:
+  # Add Bedrock models by copying an entry and changing model_name + the
+  # bedrock/<model id>. model_name is what you set in LLM_BEDROCK_MODEL.
+  - model_name: bedrock-nova-lite
+    litellm_params:
+      model: bedrock/us.amazon.nova-lite-v1:0
+      drop_params: true
+
+  # Nova Pro: markedly stronger at tool use than Nova Lite, which cuts the Bedrock
+  # modelStreamErrorException ("invalid sequence as part of ToolUse") failures the
+  # context agent's multi-tool Jira/Confluence crawl was hitting on Lite. Uses the
+  # `us.` cross-region inference profile id (required for on-demand in us-west-2).
+  - model_name: nova-pro
+    litellm_params:
+      model: bedrock/us.amazon.nova-pro-v1:0
+      drop_params: true
+
+  # - model_name: bedrock-claude-3-5-sonnet
+  #   litellm_params:
+  #     model: bedrock/us.anthropic.claude-3-5-sonnet-20241022-v2:0
+  #     drop_params: true
+
+# General settings
+litellm_settings:
+  drop_params: true
+  success_callback: []
+  failure_callback: []

@@ -1,0 +1,60 @@
+default_install_hook_types:
+  - pre-commit
+  - pre-push
+default_stages:
+  - pre-commit
+
+repos:
+  # ── Generic guards ──────────────────────────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: detect-private-key
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+      - id: check-yaml
+      - id: end-of-file-fixer
+        exclude: ^server/docs/
+      - id: trailing-whitespace
+        exclude: ^server/docs/
+
+  # ── Secrets ─────────────────────────────────────────────────────────────────
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  # ── Go formatting + linting ─────────────────────────────────────────────────
+  - repo: https://github.com/golangci/golangci-lint
+    rev: v2.12.2
+    hooks:
+      - id: golangci-lint-fmt
+        args: [--config=.golangci.yml]
+      - id: golangci-lint
+        args: [--config=.golangci.yml]
+
+  # ── Local Go checks (use the host toolchain + Makefile package list) ────────
+  - repo: local
+    hooks:
+      - id: go-vet
+        name: go vet
+        entry: make vet
+        language: system
+        pass_filenames: false
+        types: [go]
+
+      - id: go-mod-tidy
+        name: go mod tidy
+        entry: go mod tidy
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: go-test
+        name: go test
+        entry: make test
+        language: system
+        pass_filenames: false
+        types: [go]
+        stages: [pre-push]

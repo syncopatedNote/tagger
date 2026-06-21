@@ -1,0 +1,141 @@
+# Local stack for the issue-driven coding agent.
+#
+# Core services (always up):
+#   postgres      → durable backend for Temporal
+#   temporal      → Temporal server (auto-setup: creates schemas on first boot)
+#   temporal-ui   → Temporal web UI            → http://localhost:8233
+#   server        → the Gin HTTP API           → http://localhost:8080
+#   litellm       → LiteLLM proxy fronting Amazon Bedrock as an OpenAI-compatible
+#                   API, since Dagger has no native Bedrock transport.
+#
+# NOT in here: the WORKER and the Dagger engine. The worker runs the Dagger
+# agent loop and needs a Dagger engine + a docker socket, so it is run on the
+# host (`go run ./worker`) rather than containerised here. The server only needs
+# to reach Temporal, so it containerises cleanly.
+#
+# Usage:
+#   docker compose up -d   # postgres + temporal + ui + server + litellm
+#   go run ./worker        # the worker, on the host
+#
+# Reads variables from .env (docker compose loads it automatically).
+
+services:
+  # PostgreSQL — Temporal's persistence backend.
+  postgres:
+    image: postgres:16-alpine
+    container_name: tagger-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-temporal}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-temporal}
+      POSTGRES_DB: ${POSTGRES_DB:-temporal}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-temporal}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Temporal server. auto-setup provisions the DB schema and default namespace on
+  # first boot, so no manual `temporal-sql-tool` step is needed locally.
+  temporal:
+    image: temporalio/auto-setup:1.26
+    container_name: tagger-temporal
+    ports:
+      - "7233:7233" # frontend gRPC — the worker/server/starter connect here
+    environment:
+      DB: postgres12 # Temporal's driver name for PostgreSQL ≥ 12
+      DB_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-temporal}
+      POSTGRES_PWD: ${POSTGRES_PASSWORD:-temporal}
+      POSTGRES_SEEDS: postgres # hostname of the postgres service
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "tctl", "--address", "temporal:7233", "cluster", "health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # Temporal web UI.
+  temporal-ui:
+    image: temporalio/ui:2.31.2
+    container_name: tagger-temporal-ui
+    ports:
+      - "8233:8080" # browse at http://localhost:8233
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:8233
+    depends_on:
+      - temporal
+    restart: unless-stopped
+
+  # The Gin HTTP API (start / status / signal a run). Thin Temporal client.
+  server:
+    build:
+      context: . # repo root = the Go module root
+      dockerfile: server/Dockerfile.server
+    container_name: tagger-server
+    ports:
+      - "8080:8080"
+    environment:
+      # Inside the compose network Temporal is reachable by SERVICE NAME, not
+      # localhost. This is hardcoded (not ${TEMPORAL_HOSTPORT}) on purpose: the
+      # host .env sets TEMPORAL_HOSTPORT=localhost:7233 for the host-run worker,
+      # and interpolating that here would make the container dial its OWN
+      # localhost and never reach Temporal.
+      TEMPORAL_HOSTPORT: temporal:7233
+      HTTP_ADDR: ${HTTP_ADDR:-:8080}
+      API_AUTH_REQUIRED: ${API_AUTH_REQUIRED:-false}
+    depends_on:
+      temporal:
+        condition: service_started
+    restart: unless-stopped
+    # No healthcheck: the scratch image ships only the static binary (no shell,
+    # no wget/curl), so an exec-based check isn't possible. The server exposes
+    # GET /healthz for an EXTERNAL probe (load balancer / k8s httpGet); locally
+    # we rely on depends_on + the restart policy.
+
+  # --- Bedrock proxy: LiteLLM fronting Amazon Bedrock (OpenAI-compatible) ---
+  litellm:
+    # Pinned to a STABLE release (not main-latest). main-latest is a moving,
+    # bleeding-edge build whose auth/DB behaviour changes without notice — it
+    # started requiring an API key validated against a Prisma DB, returning
+    # `{"error":"No connected db"}` on every request with no DB configured.
+    # Pinning avoids that class of surprise. Bump deliberately when you choose to.
+    image: litellm/litellm:v1.83.14-stable
+    container_name: tagger-litellm
+    ports:
+      - "4000:4000"
+    environment:
+      # The proxy REQUIRES an API key on every request. Setting a master key here
+      # (and sending the SAME value as the request's key) authenticates via the
+      # master-key fast path — no database needed. The engine sends this value as
+      # OPENAI_API_KEY because LLM_BEDROCK_PROXY_KEY is set to the same string.
+      # Keep these two in sync (see .env / .env.example).
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-tagger-local-dev}
+      # AWS credentials for Bedrock. The proxy uses the standard AWS SDK chain,
+      # so these (or a mounted ~/.aws) authenticate the bedrock/* calls.
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_REGION_NAME: ${AWS_REGION:-us-east-1}
+      LITELLM_LOG: "INFO"
+    volumes:
+      - ./litellm_config.yaml:/app/config.yaml:ro
+    command: --config /app/config.yaml --port 4000 --num_workers 4
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:4000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  postgres_data:
+    driver: local
