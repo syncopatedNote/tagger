@@ -63,13 +63,6 @@ run: ## Trigger a run via the HTTP API (ISSUE=, REPO=, optional LANGUAGE=)
 		-d '{"issue_reference":"$(ISSUE)","repo_url":"$(REPO)"$(if $(LANGUAGE),$(comma)"language":"$(LANGUAGE)")}' \
 		| sed 's/.*/  → &/'
 
-# Usage: make run-cli ISSUE=PROJ-123 REPO=... [LANGUAGE=python]
-.PHONY: run-cli
-run-cli: ## Trigger a run via the starter CLI (ISSUE=, REPO=, optional LANGUAGE=)
-	@test -n "$(ISSUE)" || { echo "ISSUE= is required"; exit 1; }
-	@test -n "$(REPO)"  || { echo "REPO= is required"; exit 1; }
-	go run ./starter -issue "$(ISSUE)" -repo "$(REPO)" $(if $(LANGUAGE),-lang "$(LANGUAGE)")
-
 # --- docs -------------------------------------------------------------------
 
 # Regenerate the OpenAPI spec + Swagger UI assets (server/docs) from the
@@ -89,7 +82,6 @@ GO_PKGS := \
 	./activities/... \
 	./workflows/... \
 	./worker/... \
-	./starter/... \
 	./server/... \
 	./types/... \
 	./agent_registry/... \

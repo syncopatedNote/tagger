@@ -46,8 +46,6 @@ tagger/
 │       └── bedrock.go              ← bedrockProvider (Bedrock via LiteLLM, OpenAI-compatible)
 ├── worker/
 │   └── main.go                     ← boots the Temporal worker process
-├── starter/
-│   └── main.go                     ← submits one workflow execution, blocks on result (CLI)
 ├── server/
 │   ├── main.go                     ← Gin HTTP API: start / status / signal a run (+ Swagger annotations)
 │   ├── docs/                       ← generated OpenAPI spec + Swagger UI (swag init); committed
@@ -69,7 +67,6 @@ tagger/
 
 ```
 worker  → workflows, activities
-starter → workflows, types
 server  → workflows, types
 workflows → activities (name resolution only), types
 activities → types, agent_registry, llm_factory, dagger.io/dagger, go.temporal.io/sdk
@@ -515,7 +512,7 @@ Dagger derives a JSON schema from each public method of `Toolbox`. Tools are nam
 
 ## 15. Configuration Reference
 
-Configuration is via environment variables, supplied through a `.env` file (loaded by `godotenv.Load()` in `worker`, `starter`, and `server`) or real env vars (which always win). Copy `.env.example` to `.env` to start. CLI flags: `starter`'s `-issue`, `-repo`, `-base`, and `-lang` (optional language override).
+Configuration is via environment variables, supplied through a `.env` file (loaded by `godotenv.Load()` in `worker` and `server`) or real env vars (which always win). Copy `.env.example` to `.env` to start.
 
 | Variable | Default | Required | Description |
 |---|---|---|---|
@@ -663,10 +660,10 @@ Do not register individual activity functions. Always register the whole struct 
 cp .env.example .env
 
 # Compile the app packages (dagger/toolbox is excluded — built by the Dagger CLI)
-go build ./activities/ ./workflows/ ./worker/ ./starter/ ./server/ ./types/
+go build ./activities/ ./workflows/ ./worker/ ./server/ ./types/
 
 # Vet for common errors
-go vet ./activities/ ./workflows/ ./worker/ ./starter/ ./server/ ./types/
+go vet ./activities/ ./workflows/ ./worker/ ./server/ ./types/
 
 # Start Temporal dev server (separate terminal; UI at localhost:8233)
 temporal server start-dev
@@ -674,10 +671,7 @@ temporal server start-dev
 # Start the worker (reads .env: GitHub token, Atlassian creds, LLM key)
 go run ./worker
 
-# Option A — trigger a run via the CLI
-go run ./starter -issue "PROJ-123" -repo "https://github.com/owner/repo" -base main
-
-# Option B — trigger via the HTTP API
+# Trigger via the HTTP API
 go run ./server                                   # separate terminal, :8080
 curl -X POST localhost:8080/v1/runs -H 'content-type: application/json' \
   -d '{"issue_reference":"PROJ-123","repo_url":"https://github.com/owner/repo"}'
@@ -716,7 +710,7 @@ The Temporal UI at `http://localhost:8233` shows real-time workflow execution, p
 | `github.com/gin-gonic/gin` | `v1.10.x` | HTTP API framework (`server/`) |
 | `github.com/swaggo/gin-swagger` + `swaggo/files` | `v1.6.x` / `v1.0.x` | Serves Swagger UI at `/swagger/*` |
 | `github.com/swaggo/swag` | `v1.16.x` | OpenAPI generation; **CLI must match this library version** |
-| `github.com/joho/godotenv` | `v1.5.x` | `.env` loading for worker/starter/server |
+| `github.com/joho/godotenv` | `v1.5.x` | `.env` loading for worker/server |
 | Go toolchain | `1.26` | Module language version |
 
 When upgrading either SDK, re-read the changelog for:

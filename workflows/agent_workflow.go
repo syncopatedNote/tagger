@@ -17,7 +17,7 @@ import (
 	"github.com/syncopatedNote/tagger/types"
 )
 
-// TaskQueue is the queue the worker listens on and the starter dispatches to.
+// TaskQueue is the queue the worker listens on and workflows are dispatched to.
 const TaskQueue = "coding-agent-task-queue"
 
 // SupplyContextSignal is the signal name a human (via the Temporal UI or the
