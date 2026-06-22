@@ -26,7 +26,7 @@ func (pythonAgent) CacheMounts() []CacheMount {
 // `|| true` keeps a missing file from failing the warm-up — dependency-less or
 // pyproject-based repos proceed without error.
 func (pythonAgent) WarmupExec() []string {
-	return []string{"sh", "-c", "pip install -r requirements.txt || true"}
+	return []string{"sh", "-c", "if [ -f requirements.txt ]; then pip install -r requirements.txt; elif [ -f pyproject.toml ]; then pip install -e .; else echo 'no requirements.txt or pyproject.toml found' >&2; exit 1; fi"}
 }
 
 func (pythonAgent) TestExec() []string { return []string{"pytest"} }

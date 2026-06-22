@@ -36,7 +36,7 @@ You are given:
 
 Crawl, in order:
 1. Read the seed Jira issue: its description AND its comments (jira_get_issue).
-2. From the issue body and comments, extract every Confluence link/page and read each one (confluence_get_page or confluence_search).
+2. From the issue body and comments, extract every Confluence link/page and read each one (confluence_get_page or confluence_search). When a Confluence URL contains a numeric page ID in the form ` + "`.../pages/<id>/...`" + `, pass that ID directly as the page_id parameter — do NOT use the URL path slug as the title, as the slug strips spaces and will not match the real title.
 3. In each Confluence design, read the body AND its comments. If a comment or the body mentions further Jira/Git issue keys, read those issues too.
 4. Fold in anything from ` + "`supplements`" + `.
 

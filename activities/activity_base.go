@@ -78,18 +78,6 @@ func NewActivities() *Activities {
 	if err != nil {
 		log.Fatalf("LLM provider configuration error: %v", err)
 	}
-	// Export the provider's env contract onto THIS process so the Dagger engine
-	// the activities connect to (embedded/local) reads the right backend. This is
-	// load-bearing for derived configs like Bedrock, where the factory translates
-	// LLM_BEDROCK_* into OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_MODEL that were
-	// never in the raw environment. os.Setenv here (startup, single goroutine) is
-	// safe; never call it from inside an activity.
-	for k, v := range llm.Env {
-		if err := os.Setenv(k, v); err != nil {
-			log.Fatalf("exporting LLM env %s: %v", k, err)
-		}
-	}
-
 	return &Activities{
 		LLM:             llm,
 		MaxAgentLoops:   getenvInt("AGENT_MAX_LOOPS", 25),
