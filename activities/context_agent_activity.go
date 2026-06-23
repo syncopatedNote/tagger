@@ -128,7 +128,7 @@ func (a *Activities) RunContextAgentActivity(ctx context.Context, in types.Gathe
 	// server's tools to the model.
 	systemPrompt := contextAgentSystemPrompt
 	agent := client.LLM(dagger.LLMOpts{
-		Model:       a.LLM.Model,
+		Model:       a.llms[RoleContext].Model,
 		MaxAPICalls: a.MaxContextLoops,
 	}).
 		WithEnv(env).
@@ -147,7 +147,7 @@ func (a *Activities) RunContextAgentActivity(ctx context.Context, in types.Gathe
 		WithSystemPrompt(systemPrompt).
 		WithPrompt("Gather the full context for `issue`, applying any `supplements`, and return the JSON result.")
 
-	logger.Info("Context agent loop running", "model", a.LLM.Model, "maxAPICalls", a.MaxContextLoops)
+	logger.Info("Context agent loop running", "model", a.llms[RoleContext].Model, "maxAPICalls", a.MaxContextLoops)
 	raw, err := agent.Env().Output("result").AsString(ctx)
 	if err != nil {
 		// A Bedrock streaming tool-use failure (modelStreamErrorException / "Model

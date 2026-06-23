@@ -41,7 +41,7 @@ func (a *Activities) RunCodingAgentActivity(ctx context.Context, in types.RunCod
 	logger := activity.GetLogger(ctx)
 	logger.Info("Starting coding agent",
 		"attempt", activity.GetInfo(ctx).Attempt, "baseCommit", in.BaseCommitSHA,
-		"language", in.Language, "provider", a.LLM.Provider, "model", a.LLM.Model)
+		"language", in.Language, "provider", a.llms[RoleCoding].Provider, "model", a.llms[RoleCoding].Model)
 
 	// Resolve the per-language toolchain. An unsupported/unknown language is a
 	// non-retryable setup error — retrying can never make it supported.
@@ -121,7 +121,7 @@ func (a *Activities) RunCodingAgentActivity(ctx context.Context, in types.RunCod
 	// version predates this option, set the DAGGER_LLM_MAX_API_CALLS env var on
 	// the engine instead.
 	agent := client.LLM(dagger.LLMOpts{
-		Model:       a.LLM.Model,
+		Model:       a.llms[RoleCoding].Model,
 		MaxAPICalls: a.MaxAgentLoops,
 	}).
 		WithEnv(env).

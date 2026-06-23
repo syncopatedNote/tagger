@@ -32,11 +32,11 @@ import (
 // in a workflow input, an activity result, or anything Temporal persists to its
 // event history. Activities read it directly from this struct.
 type Activities struct {
-	// LLM is the resolved LLM backend config (provider, model, and the engine
-	// env contract) selected once at startup by the llm_factory. Its Model feeds
-	// dagger.LLMOpts.Model; the Dagger engine reads the matching provider env
-	// vars (already present in the worker process) to pick the backend.
-	LLM llm_factory.LLMConfig
+	// llms holds a resolved LLMConfig per activity role (context, coding, …).
+	// Each activity looks up its own config via a.llms[RoleXxx]. Per-role
+	// overrides come from <ROLE>_LLM_PROVIDER / <ROLE>_LLM_MODEL env vars;
+	// both fall back to the global LLM_PROVIDER / AGENT_MODEL when unset.
+	llms map[ActivityRole]llm_factory.LLMConfig
 	// MaxAgentLoops caps the tool-calling iterations the CODING agent may run in
 	// one attempt — the Dagger-level runaway guard for the expensive loop.
 	MaxAgentLoops int
@@ -74,13 +74,14 @@ type Activities struct {
 // startup — a worker that cannot reach an LLM can do no useful work, and failing
 // here is far clearer than failing inside the first activity attempt.
 func NewActivities() *Activities {
-	llm, err := llm_factory.New().CreateLLM(os.Getenv("LLM_PROVIDER"), os.Getenv("AGENT_MODEL"))
+	factory := llm_factory.New()
+	llms, err := buildActivityLLMs(factory)
 	if err != nil {
-		log.Fatalf("LLM provider configuration error: %v", err)
+		log.Fatalf("LLM configuration error: %v", err)
 	}
 	return &Activities{
-		LLM:             llm,
-		MaxAgentLoops:   getenvInt("AGENT_MAX_LOOPS", 25),
+		llms:            llms,
+		MaxAgentLoops:   getenvInt("CODING_AGENT_MAX_LOOPS", getenvInt("AGENT_MAX_LOOPS", 25)),
 		MaxContextLoops: getenvInt("AGENT_CONTEXT_MAX_LOOPS", 20),
 		GitImage:        getenv("AGENT_GIT_IMAGE", "alpine/git:latest"),
 		githubToken:     os.Getenv("GITHUB_TOKEN"),

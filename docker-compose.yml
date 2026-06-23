@@ -212,6 +212,10 @@ services:
       LLM_BEDROCK_PROXY_KEY: ${LLM_BEDROCK_PROXY_KEY}
       ANTHROPIC_API_KEY:     ${ANTHROPIC_API_KEY:-}
       ANTHROPIC_MODEL:       ${ANTHROPIC_MODEL:-}
+      CODING_LLM_PROVIDER:   ${CODING_LLM_PROVIDER:-}
+      CODING_LLM_MODEL:      ${CODING_LLM_MODEL:-}
+      CONTEXT_LLM_PROVIDER:  ${CONTEXT_LLM_PROVIDER:-}
+      CONTEXT_LLM_MODEL:     ${CONTEXT_LLM_MODEL:-}
 
       # Credentials — injected at runtime, never baked into the image.
       GITHUB_TOKEN:          ${GITHUB_TOKEN:-}
@@ -227,6 +231,7 @@ services:
       # Agent tuning
       AGENT_SIMULATE_PR:       ${AGENT_SIMULATE_PR:-true}
       AGENT_MAX_LOOPS:         ${AGENT_MAX_LOOPS:-25}
+      CODING_AGENT_MAX_LOOPS:  ${CODING_AGENT_MAX_LOOPS:-50}
       AGENT_CONTEXT_MAX_LOOPS: ${AGENT_CONTEXT_MAX_LOOPS:-20}
       AGENT_GIT_IMAGE:         ${AGENT_GIT_IMAGE:-alpine/git:latest}
       ATLASSIAN_MCP_IMAGE:     ${ATLASSIAN_MCP_IMAGE:-ghcr.io/sooperset/mcp-atlassian:latest}
