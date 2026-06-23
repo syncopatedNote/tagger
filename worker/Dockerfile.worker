@@ -1,0 +1,33 @@
+# ---- build stage -------------------------------------------------------
+FROM golang:1.26 AS build
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -trimpath -ldflags="-s -w" \
+    -o /out/worker ./worker
+
+# Pre-fetch the Dagger CLI that matches dagger.io/dagger v0.21.7 in go.mod.
+# TARGETARCH is injected by Docker (amd64 / arm64). The SDK's FromLocalCLI
+# path (triggered by _EXPERIMENTAL_DAGGER_CLI_BIN) uses this binary directly,
+# so the container never downloads anything at startup.
+ARG TARGETARCH=amd64
+RUN curl -fsSL \
+    "https://dl.dagger.io/dagger/releases/0.21.7/dagger_v0.21.7_linux_${TARGETARCH}.tar.gz" \
+    | tar -xz -C /out dagger
+
+# ---- runtime stage -----------------------------------------------------
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates docker-cli
+
+COPY --from=build /out/worker /worker
+COPY --from=build /out/dagger  /usr/local/bin/dagger
+
+# Tell the Dagger SDK where the pre-installed CLI binary lives.
+# This triggers FromLocalCLI and skips any network download at startup.
+ENV _EXPERIMENTAL_DAGGER_CLI_BIN=/usr/local/bin/dagger
+
+ENTRYPOINT ["/worker"]

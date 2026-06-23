@@ -36,7 +36,7 @@ You are given:
 
 Crawl, in order:
 1. Read the seed Jira issue: its description AND its comments (jira_get_issue).
-2. From the issue body and comments, extract every Confluence link/page and read each one (confluence_get_page or confluence_search).
+2. From the issue body and comments, extract every Confluence link/page and read each one (confluence_get_page or confluence_search). When a Confluence URL contains a numeric page ID in the form ` + "`.../pages/<id>/...`" + `, pass that ID directly as the page_id parameter — do NOT use the URL path slug as the title, as the slug strips spaces and will not match the real title.
 3. In each Confluence design, read the body AND its comments. If a comment or the body mentions further Jira/Git issue keys, read those issues too.
 4. Fold in anything from ` + "`supplements`" + `.
 
@@ -128,7 +128,7 @@ func (a *Activities) RunContextAgentActivity(ctx context.Context, in types.Gathe
 	// server's tools to the model.
 	systemPrompt := contextAgentSystemPrompt
 	agent := client.LLM(dagger.LLMOpts{
-		Model:       a.LLM.Model,
+		Model:       a.llms[RoleContext].Model,
 		MaxAPICalls: a.MaxContextLoops,
 	}).
 		WithEnv(env).
@@ -147,7 +147,7 @@ func (a *Activities) RunContextAgentActivity(ctx context.Context, in types.Gathe
 		WithSystemPrompt(systemPrompt).
 		WithPrompt("Gather the full context for `issue`, applying any `supplements`, and return the JSON result.")
 
-	logger.Info("Context agent loop running", "model", a.LLM.Model, "maxAPICalls", a.MaxContextLoops)
+	logger.Info("Context agent loop running", "model", a.llms[RoleContext].Model, "maxAPICalls", a.MaxContextLoops)
 	raw, err := agent.Env().Output("result").AsString(ctx)
 	if err != nil {
 		// A Bedrock streaming tool-use failure (modelStreamErrorException / "Model

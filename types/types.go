@@ -115,6 +115,10 @@ type RunCodingAgentInput struct {
 type RunCodingAgentResult struct {
 	BranchName    string
 	HeadCommitSHA string
+	// SnapshotPath is the worker-local path where the agent's last written /src
+	// tree was exported. Non-empty only when the loop failed before completing —
+	// lets a human inspect the generated code without re-running the loop.
+	SnapshotPath string
 }
 
 // CreatePullRequestInput is handed to the PR-opening activity.

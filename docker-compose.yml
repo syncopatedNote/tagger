@@ -1,21 +1,21 @@
 # Local stack for the issue-driven coding agent.
 #
 # Core services (always up):
-#   postgres      → durable backend for Temporal
-#   temporal      → Temporal server (auto-setup: creates schemas on first boot)
-#   temporal-ui   → Temporal web UI            → http://localhost:8233
-#   server        → the Gin HTTP API           → http://localhost:8080
-#   litellm       → LiteLLM proxy fronting Amazon Bedrock as an OpenAI-compatible
-#                   API, since Dagger has no native Bedrock transport.
-#
-# NOT in here: the WORKER and the Dagger engine. The worker runs the Dagger
-# agent loop and needs a Dagger engine + a docker socket, so it is run on the
-# host (`go run ./worker`) rather than containerised here. The server only needs
-# to reach Temporal, so it containerises cleanly.
+#   postgres        → durable backend for Temporal
+#   temporal        → Temporal server (auto-setup: creates schemas on first boot)
+#   temporal-ui     → Temporal web UI            → http://localhost:8233
+#   server          → the Gin HTTP API           → http://localhost:8080
+#   litellm         → LiteLLM proxy fronting Amazon Bedrock as an OpenAI-compatible
+#                     API, since Dagger has no native Bedrock transport.
+#   dagger-engine   → persistent Dagger engine the worker connects to. Running it
+#                     here (vs auto-provisioned) lets us bake the LLM env vars into
+#                     the container, so OPENAI_BASE_URL/KEY/MODEL are present when
+#                     the engine starts — not set too late by worker os.Setenv.
+#   worker          → the Temporal worker that drives the Dagger agent loop.
 #
 # Usage:
-#   docker compose up -d   # postgres + temporal + ui + server + litellm
-#   go run ./worker        # the worker, on the host
+#   docker compose up -d   # full stack
+#   go run ./worker        # local dev alternative for the worker only
 #
 # Reads variables from .env (docker compose loads it automatically).
 
@@ -136,6 +136,9 @@ services:
       - ./litellm_config.yaml:/app/config.yaml:ro
     command: --config /app/config.yaml --port 4000 --num_workers 2
     restart: unless-stopped
+    networks:
+      default:
+        ipv4_address: 172.28.1.10  # static so dagger-engine's extra_hosts entry survives restarts
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:4000/health"]
       interval: 30s
@@ -143,6 +146,118 @@ services:
       retries: 3
       start_period: 40s
 
+  # --- Dagger engine: persistent, compose-managed ----------------------------
+  # Running the engine as a compose service (rather than letting the SDK
+  # auto-provision it) is the fix for the LLM config timing problem: the engine
+  # reads its env at container start, before any worker process runs.  All
+  # provider-specific vars (OPENAI_BASE_URL etc.) must be set here so they are
+  # in the engine's environment from the moment it accepts sessions.
+  #
+  # IMPORTANT VERSION PIN: this image tag must match dagger.io/dagger in go.mod.
+  # The Dagger SDK and engine negotiate a protocol version at connect time; a
+  # mismatch causes an immediate connection error.
+  dagger-engine:
+    image: registry.dagger.io/engine:v0.21.7
+    container_name: tagger-dagger-engine
+    privileged: true                              # BuildKit requires extended kernel caps
+    extra_hosts:
+      - "litellm:172.28.1.10"                    # The Dagger engine is a privileged container runtime and
+                                                  # rewrites its own /etc/resolv.conf at startup, so compose
+                                                  # dns: overrides don't stick. /etc/hosts is written once
+                                                  # at container create time and the engine never touches it,
+                                                  # so extra_hosts is the only reliable way to resolve the
+                                                  # litellm service name from within the engine.
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock # engine spawns MCP + workspace containers
+      - dagger-engine-cache:/var/lib/dagger        # persist content-addressable build cache
+    environment:
+      # Bedrock via LiteLLM: translate the bedrock provider vars to what Dagger
+      # expects (OpenAI-compatible endpoint). The engine is on the compose network
+      # so "litellm" resolves correctly here.
+      OPENAI_BASE_URL:   ${LLM_BEDROCK_PROXY_URL}
+      OPENAI_API_KEY:    ${LLM_BEDROCK_PROXY_KEY}
+      OPENAI_MODEL:      ${LLM_BEDROCK_MODEL}
+      # Anthropic direct (LLM_PROVIDER=anthropic). Empty when using Bedrock.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL:   ${ANTHROPIC_MODEL:-}
+    depends_on:
+      - litellm
+    restart: unless-stopped
+
+  # --- Temporal worker: drives the Dagger agent loop ----------------------
+  worker:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile.worker
+    container_name: tagger-worker
+    volumes:
+      # The Dagger CLI (pre-baked in the image) uses the Docker socket to exec
+      # into tagger-dagger-engine when _EXPERIMENTAL_DAGGER_RUNNER_HOST is set.
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      TEMPORAL_HOSTPORT: temporal:7233
+
+      # Route the worker's Dagger CLI sessions to the compose-managed engine.
+      # Without this the CLI auto-provisions a new engine container that has no
+      # LLM env vars configured.
+      _EXPERIMENTAL_DAGGER_RUNNER_HOST: docker-container://tagger-dagger-engine
+
+      # LLM — worker still needs these so llm_factory can resolve a.LLM.Model
+      # (passed to dagger.LLMOpts{Model:}). The engine uses its OWN env for the
+      # actual backend call; these are NOT forwarded to the engine from here.
+      LLM_PROVIDER:          ${LLM_PROVIDER:-bedrock}
+      AGENT_MODEL:           ${AGENT_MODEL:-}
+      LLM_BEDROCK_MODEL:     ${LLM_BEDROCK_MODEL}
+      LLM_BEDROCK_PROXY_URL: ${LLM_BEDROCK_PROXY_URL}
+      LLM_BEDROCK_PROXY_KEY: ${LLM_BEDROCK_PROXY_KEY}
+      ANTHROPIC_API_KEY:     ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL:       ${ANTHROPIC_MODEL:-}
+      CODING_LLM_PROVIDER:   ${CODING_LLM_PROVIDER:-}
+      CODING_LLM_MODEL:      ${CODING_LLM_MODEL:-}
+      CONTEXT_LLM_PROVIDER:  ${CONTEXT_LLM_PROVIDER:-}
+      CONTEXT_LLM_MODEL:     ${CONTEXT_LLM_MODEL:-}
+
+      # Credentials — injected at runtime, never baked into the image.
+      GITHUB_TOKEN:          ${GITHUB_TOKEN:-}
+      JIRA_URL:              ${JIRA_URL:-}
+      JIRA_USERNAME:         ${JIRA_USERNAME:-}
+      JIRA_API_TOKEN:        ${JIRA_API_TOKEN:-}
+      JIRA_SSL_VERIFY:       ${JIRA_SSL_VERIFY:-false}
+      CONFLUENCE_URL:        ${CONFLUENCE_URL:-}
+      CONFLUENCE_USERNAME:   ${CONFLUENCE_USERNAME:-}
+      CONFLUENCE_API_TOKEN:  ${CONFLUENCE_API_TOKEN:-}
+      CONFLUENCE_SSL_VERIFY: ${CONFLUENCE_SSL_VERIFY:-false}
+
+      # Agent tuning
+      AGENT_SIMULATE_PR:       ${AGENT_SIMULATE_PR:-true}
+      AGENT_MAX_LOOPS:         ${AGENT_MAX_LOOPS:-25}
+      CODING_AGENT_MAX_LOOPS:  ${CODING_AGENT_MAX_LOOPS:-50}
+      AGENT_CONTEXT_MAX_LOOPS: ${AGENT_CONTEXT_MAX_LOOPS:-20}
+      AGENT_GIT_IMAGE:         ${AGENT_GIT_IMAGE:-alpine/git:latest}
+      ATLASSIAN_MCP_IMAGE:     ${ATLASSIAN_MCP_IMAGE:-ghcr.io/sooperset/mcp-atlassian:latest}
+      GITHUB_MCP_IMAGE:        ${GITHUB_MCP_IMAGE:-ghcr.io/github/github-mcp-server}
+
+      # Observability
+      DAGGER_VERBOSITY:                ${DAGGER_VERBOSITY:-0}
+      OTEL_EXPORTER_OTLP_TRACES_LIVE: ${OTEL_EXPORTER_OTLP_TRACES_LIVE:-}
+      DAGGER_CLOUD_TOKEN:              ${DAGGER_CLOUD_TOKEN:-}
+
+    depends_on:
+      temporal:
+        condition: service_started
+      dagger-engine:
+        condition: service_started
+    restart: unless-stopped
+
 volumes:
   postgres_data:
     driver: local
+  dagger-engine-cache:
+    driver: local
+
+networks:
+  default:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

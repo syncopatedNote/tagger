@@ -1,10 +1,10 @@
-# Convenience targets for running the system in HYBRID mode:
-#   infra (postgres + temporal + ui + server [+ litellm]) in docker compose,
-#   the WORKER on the host (it needs the Dagger CLI + a docker socket).
+# Convenience targets for the full compose stack (all services including the
+# worker and Dagger engine) or for running just the worker on the host.
 #
-# Why hybrid: the worker drives the Dagger agent loop, which spawns containers
-# via a Dagger engine. Running it on the host avoids docker-in-docker. See
-# README "Run with Docker Compose".
+# Full stack:   make up        (docker compose up -d — runs everything)
+# Local worker: make worker    (go run ./worker — useful during dev; requires
+#               the dagger-engine compose service to already be up so that
+#               _EXPERIMENTAL_DAGGER_RUNNER_HOST in .env resolves correctly)
 
 # Load .env so targets (e.g. the worker) see the same config the containers do.
 ifneq (,$(wildcard .env))
@@ -27,7 +27,7 @@ up: ## Start core infra (postgres + temporal + ui + server)
 .PHONY: up-bedrock
 up-bedrock: ## Start core infra AND the LiteLLM Bedrock proxy (:4000)
 	docker compose --profile bedrock up -d
-	@echo "LiteLLM proxy → http://localhost:4000 (engine reaches it at host.docker.internal:4000)"
+	@echo "LiteLLM proxy → http://localhost:4000"
 
 .PHONY: worker
 worker: ## Run the worker on the host (polls Temporal, runs Dagger activities)

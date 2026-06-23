@@ -10,6 +10,7 @@ import (
 
 	"dagger.io/dagger"
 	"go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/log"
 	"go.temporal.io/sdk/temporal"
 
 	"github.com/syncopatedNote/tagger/agent_registry/agents"
@@ -39,9 +40,11 @@ import (
 //  7. Return only the branch name + head SHA (claim-check).
 func (a *Activities) RunCodingAgentActivity(ctx context.Context, in types.RunCodingAgentInput) (types.RunCodingAgentResult, error) {
 	logger := activity.GetLogger(ctx)
+	info := activity.GetInfo(ctx)
+	volName := snapshotVolumeName(in.IssueReference, info.Attempt)
 	logger.Info("Starting coding agent",
-		"attempt", activity.GetInfo(ctx).Attempt, "baseCommit", in.BaseCommitSHA,
-		"language", in.Language, "provider", a.LLM.Provider, "model", a.LLM.Model)
+		"attempt", info.Attempt, "baseCommit", in.BaseCommitSHA,
+		"language", in.Language, "provider", a.llms[RoleCoding].Provider, "model", a.llms[RoleCoding].Model)
 
 	// Resolve the per-language toolchain. An unsupported/unknown language is a
 	// non-retryable setup error — retrying can never make it supported.
@@ -88,6 +91,7 @@ func (a *Activities) RunCodingAgentActivity(ctx context.Context, in types.RunCod
 	for _, m := range agentTool.CacheMounts() {
 		workspace = workspace.WithMountedCache(m.Path, client.CacheVolume(m.Volume))
 	}
+	workspace = workspace.WithMountedCache("/snapshot", client.CacheVolume(volName))
 	// Warm the dependency cache up front so the agent's first test run is fast.
 	if warmup := agentTool.WarmupExec(); len(warmup) > 0 {
 		workspace = workspace.WithExec(warmup)
@@ -121,7 +125,7 @@ func (a *Activities) RunCodingAgentActivity(ctx context.Context, in types.RunCod
 	// version predates this option, set the DAGGER_LLM_MAX_API_CALLS env var on
 	// the engine instead.
 	agent := client.LLM(dagger.LLMOpts{
-		Model:       a.LLM.Model,
+		Model:       a.llms[RoleCoding].Model,
 		MaxAPICalls: a.MaxAgentLoops,
 	}).
 		WithEnv(env).
@@ -135,8 +139,9 @@ func (a *Activities) RunCodingAgentActivity(ctx context.Context, in types.RunCod
 		// A Sync error here usually means the loop hit its MaxAPICalls cap or the
 		// engine aborted (e.g. Temporal cancelled ctx). Either way it is not
 		// worth blindly retrying the full expensive loop.
-		return types.RunCodingAgentResult{}, temporal.NewNonRetryableApplicationError(
-			"agent loop did not complete", "AgentExhaustedError", err)
+		snapshotPath := exportSnapshot(ctx, client, agentTool.BaseImage(), volName, in.IssueReference, info.Attempt, logger)
+		return types.RunCodingAgentResult{SnapshotPath: snapshotPath},
+			temporal.NewNonRetryableApplicationError("agent loop did not complete", "AgentExhaustedError", err)
 	}
 
 	// 4. Independent verification gate — never trust the agent's self-report.
@@ -147,6 +152,7 @@ func (a *Activities) RunCodingAgentActivity(ctx context.Context, in types.RunCod
 			fmt.Sprintf("agent finished but `%s` still fails", testCmd), "AgentExhaustedError", err)
 	}
 	logger.Info("Agent passed verification; publishing branch")
+	cleanupSnapshot(ctx, client, agentTool.BaseImage(), volName, logger)
 
 	// 5. Publish. The Git token is attached ONLY to this pusher container, which
 	//    the LLM never had access to. SECRET CUSTODY (Verification Q3): the
@@ -259,4 +265,39 @@ func lastNonEmptyLine(s string) string {
 		}
 	}
 	return ""
+}
+
+// snapshotVolumeName returns a unique Dagger cache volume name scoped to a
+// specific issue and attempt so concurrent or retried runs never share state.
+func snapshotVolumeName(issueRef string, attempt int32) string {
+	return fmt.Sprintf("tagger-snapshot-%s-%d", slugify(issueRef), attempt)
+}
+
+// exportSnapshot reads the /snapshot cache volume the agent populated during its
+// loop and exports its contents to the worker filesystem. Returns the export path
+// on success, or an empty string if the volume was empty or the export failed.
+func exportSnapshot(ctx context.Context, client *dagger.Client, baseImage, volName, issueRef string, attempt int32, logger log.Logger) string {
+	exportPath := fmt.Sprintf("/tmp/tagger-snapshot-%s-%d", slugify(issueRef), attempt)
+	reader := client.Container().
+		From(baseImage).
+		WithMountedCache("/snapshot", client.CacheVolume(volName))
+	if _, err := reader.Directory("/snapshot").Export(ctx, exportPath); err != nil {
+		logger.Warn("Agent loop failed; no snapshot available (agent may not have reached code-writing stage)",
+			"exportErr", err)
+		return ""
+	}
+	logger.Warn("Agent loop failed; code snapshot exported", "path", exportPath, "volume", volName)
+	return exportPath
+}
+
+// cleanupSnapshot scrubs the /snapshot cache volume after a successful run so a
+// future retry of the same issue starts with an empty snapshot.
+func cleanupSnapshot(ctx context.Context, client *dagger.Client, baseImage, volName string, logger log.Logger) {
+	cleanup := client.Container().
+		From(baseImage).
+		WithMountedCache("/snapshot", client.CacheVolume(volName)).
+		WithExec([]string{"sh", "-c", "rm -rf /snapshot/*"})
+	if _, err := cleanup.Sync(ctx); err != nil {
+		logger.Warn("Failed to clean up snapshot volume (non-fatal)", "volume", volName, "err", err)
+	}
 }

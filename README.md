@@ -1,6 +1,6 @@
 # Tagger — Issue-to-PR AI Coding Agent
 
-Tagger turns a tracked issue into a pull request. Point it at a Jira ticket or GitHub issue and a target repository; it reads the requirements, writes the code, runs the tests, and opens a PR — autonomously, with a human-in-the-loop escape hatch when context is ambiguous.
+Tagger turns a tracked issue into a pull request. Point it at a Jira ticket and a target repository; it reads the requirements, writes the code, runs the tests, and opens a PR — autonomously, with a human-in-the-loop escape hatch when context is ambiguous.
 
 ## The problem
 
@@ -27,7 +27,7 @@ Tagger runs as a durable, two-phase workflow:
                          └─────────────────────────────────┘
 ```
 
-**Context phase.** An LLM agent crawls Jira and Confluence via a read-only MCP connection and synthesises a structured requirements document. If the requirements are incomplete, the workflow pauses and waits for a human signal before continuing — no silent hallucination of missing context.
+**Context phase.** An LLM agent crawls Jira and Confluence via a read-only MCP connection and synthesises a structured requirements document. If a GitHub token is configured, it also optionally reads referenced GitHub issues, PRs, and files. If the requirements are incomplete, the workflow pauses and waits for a human signal before continuing — no silent hallucination of missing context.
 
 **Coding phase.** A second LLM agent runs inside an isolated Dagger container with the target repository mounted and the appropriate language toolchain available. It reads, writes, and runs tests in a loop until the suite passes, then pushes a feature branch and opens a pull request.
 
@@ -41,13 +41,15 @@ Tagger runs as a durable, two-phase workflow:
 
 **Language-agnostic by design.** The agent selects the appropriate toolchain — Go, Python, or others — either from an explicit override or by probing the target repository's marker files. Adding a new language is a self-contained extension.
 
-**Pluggable LLM providers.** Both the context agent and the coding agent resolve their backend at startup. Anthropic, OpenAI-compatible endpoints, and Amazon Bedrock are supported out of the box.
+**Per-activity LLM configuration.** The context agent and coding agent can be pointed at different LLM backends or models independently. A cheaper, faster model is often sufficient for the Jira/Confluence crawl; the coding agent benefits from the most capable model available. Both fall back to a shared global setting when no per-role override is set.
+
+**Pluggable LLM providers.** Anthropic, OpenAI-compatible endpoints, and Amazon Bedrock (via a bundled LiteLLM proxy) are supported out of the box.
 
 ## Requirements
 
-- Go 1.23+
-- [Dagger CLI](https://docs.dagger.io/install) ≥ v0.19
-- A running [Temporal](https://docs.temporal.io/self-hosted-guide) server
+- Go 1.26+
+- [Dagger CLI](https://docs.dagger.io/install) v0.21.7 (required on the host only when running the worker locally via `make worker`; bundled inside the compose worker image)
+- Docker (for the compose stack and Dagger engine)
 - An LLM provider API key (Anthropic, OpenAI, or Bedrock)
 - Atlassian API tokens (Jira + Confluence) for the context phase
 - A GitHub token with permission to push branches and open pull requests
@@ -58,33 +60,85 @@ Tagger runs as a durable, two-phase workflow:
 # 1. Configure
 cp .env.example .env   # fill in your provider key, GitHub token, and Atlassian credentials
 
-# 2. Start the infrastructure (Temporal + API server)
+# 2. Start the full stack
 make up
+```
 
-# 3. Start the worker (runs on the host — needs the Dagger CLI and a Docker socket)
-make worker
+`make up` brings up the complete stack in Docker:
 
-# 4. Trigger a run
+| Service | Purpose |
+|---|---|
+| `postgres` | Temporal's persistence backend |
+| `temporal` | Temporal server (auto-provisions schema on first boot) |
+| `temporal-ui` | Temporal web UI → http://localhost:8233 |
+| `server` | Gin HTTP API for triggering and signalling runs → http://localhost:8080 |
+| `litellm` | LiteLLM proxy fronting Amazon Bedrock as an OpenAI-compatible API → http://localhost:4000 |
+| `dagger-engine` | Persistent Dagger engine with LLM credentials baked in at container start |
+| `worker` | Temporal worker that drives the Dagger agent loop |
+
+```sh
+# 3. Trigger a run
 make run ISSUE=PROJ-123 REPO=https://github.com/your-org/your-repo
+
+# Optionally pin the language toolchain (skip auto-detection)
+make run ISSUE=PROJ-123 REPO=https://github.com/your-org/your-repo LANGUAGE=python
 ```
 
 The worker logs progress. When the run completes, the pull request URL is returned via the API and visible in the Temporal UI at `http://localhost:8233`.
 
 ### LLM providers
 
-| Provider | Notes |
-|---|---|
-| Anthropic | Default. Set your API key in `.env`. |
-| OpenAI-compatible | Covers OpenAI, OpenRouter, LiteLLM, and local models — set the base URL to point at any compatible endpoint. |
-| Amazon Bedrock | Routed through a bundled LiteLLM proxy. Start with `make up-bedrock` and add your AWS credentials to `.env`. |
+| Provider | `LLM_PROVIDER` | Notes |
+|---|---|---|
+| Anthropic | `anthropic` | Set `ANTHROPIC_API_KEY` in `.env`. |
+| OpenAI-compatible | `openai` | Covers OpenAI, OpenRouter, LiteLLM, and local models — set `OPENAI_BASE_URL` for any compatible endpoint. |
+| Amazon Bedrock | `bedrock` | Routed through the bundled LiteLLM proxy (always starts with `make up`). Add your AWS credentials and set `LLM_BEDROCK_MODEL` to a model name from `litellm_config.yaml`. |
 
-### Running without Docker
+### Per-activity model overrides
 
-A fully local setup is supported for development: run a Temporal dev server on the host, start the worker directly, and trigger runs via the CLI or the HTTP API. See `.env.example` for the full configuration reference.
+The context agent and coding agent can use different models. Set any combination in `.env`:
+
+```sh
+# Context agent — cheaper/faster model is usually sufficient for Jira/Confluence crawling
+CONTEXT_LLM_PROVIDER=bedrock
+CONTEXT_LLM_MODEL=nova-lite
+
+# Coding agent — most capable model for implementation
+CODING_LLM_PROVIDER=bedrock
+CODING_LLM_MODEL=claude-sonnet-4.5
+```
+
+Unset variables fall back to the global `LLM_PROVIDER` / `AGENT_MODEL`. Existing deployments that only set the global vars keep working unchanged.
+
+### Running the worker locally
+
+To run the worker on the host instead of in compose (useful during development):
+
+```sh
+# Start the supporting stack (without the worker service)
+make up
+
+# Run the worker on the host — picks up .env automatically
+make worker
+```
+
+The worker connects to the compose-managed `dagger-engine` container via `_EXPERIMENTAL_DAGGER_RUNNER_HOST` in `.env`. The host must have the Dagger CLI v0.21.7 installed and a Docker socket available.
+
+### Supplying missing context
+
+If the context agent can't gather enough information from the Jira ticket, the workflow halts and waits. Supply the missing context via the API:
+
+```sh
+curl -X POST localhost:8080/v1/runs/<workflow_id>/signal \
+  -H 'content-type: application/json' \
+  -d '{"info":"design doc: https://your.atlassian.net/wiki/...."}'
+```
+
+Or use the "Send Signal" button in the Temporal UI at `http://localhost:8233`.
 
 ## Contributing
 
-Install the git hooks after your first commit:
+Install the git hooks after your first clone:
 
 ```sh
 make hooks
