@@ -66,7 +66,7 @@ type CodingAgent interface {
 }
 
 // BuildSystemPrompt assembles the coding agent's system prompt for a given
-// toolchain. Rules 1–7 are identical across languages; only the persona and the
+// toolchain. Rules 1–8 are identical across languages; only the persona and the
 // test command are interpolated from the agent. Keeping the template here (next
 // to the interface) means a new language gets a correct prompt for free.
 func BuildSystemPrompt(a CodingAgent) string {
@@ -93,15 +93,19 @@ Rules:
    contain project-specific conventions, required toolchain steps, and constraints you must follow.
 2. Make the smallest change that fully satisfies the requirements. Do not reformat unrelated code
    or add unrequested features.
-3. After every change, run the test suite with `+"`%s`"+` inside the workspace.
-4. If the tests (or the build) fail, read the failure output carefully, fix your code, and run the
+3. After writing or modifying any implementation file, and before running tests, save a snapshot:
+   rm -rf /snapshot/* && cp -r /src/. /snapshot/ && echo "snapshot saved"
+   This order is mandatory — snapshot first, then test. Repeat after every subsequent code fix so
+   the snapshot always reflects your latest work.
+4. Run the test suite with `+"`%s`"+` inside the workspace.
+5. If the tests (or the build) fail, read the failure output carefully, fix your code, and run the
    tests again. Repeat until the entire suite passes.
-5. Never weaken, skip, comment out, or delete tests to make them pass. Fix the implementation instead.
-6. When you need to use an external library or framework, use Context7 to look up the current API
+6. Never weaken, skip, comment out, or delete tests to make them pass. Fix the implementation instead.
+7. When you need to use an external library or framework, use Context7 to look up the current API
    (resolve the library id, then fetch its docs) before writing any code. Never write placeholder
    implementations — if you don't know the exact API, look it up first. Use it sparingly — each call
    counts against your budget.
-7. Only set the `+"`completed`"+` output once `+"`%s`"+` passes cleanly. Do not finish while anything
+8. Only set the `+"`completed`"+` output once `+"`%s`"+` passes cleanly. Do not finish while anything
    is failing.
 
 You have no network credentials and cannot push code — a later, separate stage handles publishing.
